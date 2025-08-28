@@ -1,0 +1,64 @@
+name: 'Repo Size Guardian'
+description: 'A GitHub action to prevent large or unwanted files from entering repository history via PRs'
+author: 'technic960183'
+
+inputs:
+  max_text_size_kb:
+    description: 'Maximum size for text files in KB'
+    required: false
+    default: '500'
+  max_binary_size_kb:
+    description: 'Maximum size for binary files in KB'
+    required: false
+    default: '100'
+  policy_path:
+    description: 'Path to policy configuration file'
+    required: false
+    default: '.github/repo-size-guardian.yml'
+  fail_on:
+    description: 'Minimum severity that causes job failure (warn|error)'
+    required: false
+    default: 'error'
+  scan_mode:
+    description: 'Scan mode (history|diff)'
+    required: false
+    default: 'history'
+  dedupe_blobs:
+    description: 'Deduplicate blob evaluation'
+    required: false
+    default: 'true'
+  annotate_pr:
+    description: 'Add PR annotations for violations'
+    required: false
+    default: 'true'
+
+outputs:
+  violations_found:
+    description: 'Number of violations found'
+  summary:
+    description: 'Summary of scan results'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+    
+    - name: Run repo-size-guardian
+      shell: bash
+      run: |
+        cd ${{ github.action_path }}
+        python -m repo_size_guardian \
+          --max-text-size-kb "${{ inputs.max_text_size_kb }}" \
+          --max-binary-size-kb "${{ inputs.max_binary_size_kb }}" \
+          --policy-path "${{ inputs.policy_path }}" \
+          --fail-on "${{ inputs.fail_on }}" \
+          --scan-mode "${{ inputs.scan_mode }}" \
+          --dedupe-blobs "${{ inputs.dedupe_blobs }}" \
+          --annotate-pr "${{ inputs.annotate_pr }}"
+
+branding:
+  icon: 'shield'
+  color: 'blue'
