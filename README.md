@@ -19,7 +19,8 @@ repo-size-guardian scans all commits introduced by a PR (not just the final diff
 
 ```yaml
 name: PR File History Scan
-on: [pull_request]
+on:
+  pull_request:
 
 jobs:
   scan:

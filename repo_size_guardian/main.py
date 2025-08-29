@@ -20,14 +20,14 @@ def main():
     parser.add_argument(
         "--max-text-size-kb",
         type=int,
-        default=500,
-        help="Maximum size for text files in KB"
+        default=None,
+        help="Maximum size for text files in KB (unlimited if not specified)"
     )
     parser.add_argument(
         "--max-binary-size-kb", 
         type=int,
-        default=100,
-        help="Maximum size for binary files in KB"
+        default=None,
+        help="Maximum size for binary files in KB (unlimited if not specified)"
     )
     parser.add_argument(
         "--policy-path",
@@ -63,7 +63,9 @@ def main():
     
     # No-op for now - just exit successfully
     print(f"repo-size-guardian {__version__} - no-op mode")
-    print(f"Config: max_text={args.max_text_size_kb}KB, max_binary={args.max_binary_size_kb}KB")
+    max_text_display = f"{args.max_text_size_kb}KB" if args.max_text_size_kb is not None else "unlimited"
+    max_binary_display = f"{args.max_binary_size_kb}KB" if args.max_binary_size_kb is not None else "unlimited"
+    print(f"Config: max_text={max_text_display}, max_binary={max_binary_display}")
     print(f"Policy: {args.policy_path}, fail_on: {args.fail_on}, scan_mode: {args.scan_mode}")
     return 0
 

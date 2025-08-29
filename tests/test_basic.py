@@ -3,11 +3,6 @@ Test suite for repo-size-guardian.
 """
 
 import unittest
-import sys
-import os
-
-# Add the parent directory to the path so we can import repo_size_guardian
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from repo_size_guardian import __version__
 

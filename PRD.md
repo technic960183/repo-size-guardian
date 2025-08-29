@@ -24,10 +24,10 @@ repo-size-guardian scans all commits introduced by a PR (not just the final diff
 ### 3.1 Action Inputs (Configurable Parameters)
 
 - max_text_size_kb (number)
-  - Default: 500
+  - Default: unlimited (no size limit)
   - Any detected text file larger than this triggers the configured action (warn/error) unless overridden by the policy file.
 - max_binary_size_kb (number)
-  - Default: 100
+  - Default: unlimited (no size limit)
   - Any detected binary file larger than this triggers the configured action (warn/error) unless overridden by the policy file.
 - policy_path (string)
   - Default: ".github/repo-size-guardian.yml"

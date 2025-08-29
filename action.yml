@@ -1,16 +1,14 @@
 name: 'Repo Size Guardian'
 description: 'A GitHub action to prevent large or unwanted files from entering repository history via PRs'
-author: 'technic960183'
+author: 'Yuan-Ming Hsu'
 
 inputs:
   max_text_size_kb:
     description: 'Maximum size for text files in KB'
     required: false
-    default: '500'
   max_binary_size_kb:
     description: 'Maximum size for binary files in KB'
     required: false
-    default: '100'
   policy_path:
     description: 'Path to policy configuration file'
     required: false
@@ -50,14 +48,21 @@ runs:
       shell: bash
       run: |
         cd ${{ github.action_path }}
-        python -m repo_size_guardian \
-          --max-text-size-kb "${{ inputs.max_text_size_kb }}" \
-          --max-binary-size-kb "${{ inputs.max_binary_size_kb }}" \
-          --policy-path "${{ inputs.policy_path }}" \
-          --fail-on "${{ inputs.fail_on }}" \
-          --scan-mode "${{ inputs.scan_mode }}" \
-          --dedupe-blobs "${{ inputs.dedupe_blobs }}" \
+        pip install -e .
+        args=(
+          --policy-path "${{ inputs.policy_path }}"
+          --fail-on "${{ inputs.fail_on }}"
+          --scan-mode "${{ inputs.scan_mode }}"
+          --dedupe-blobs "${{ inputs.dedupe_blobs }}"
           --annotate-pr "${{ inputs.annotate_pr }}"
+        )
+        if [ -n "${{ inputs.max_text_size_kb }}" ]; then
+          args+=(--max-text-size-kb "${{ inputs.max_text_size_kb }}")
+        fi
+        if [ -n "${{ inputs.max_binary_size_kb }}" ]; then
+          args+=(--max-binary-size-kb "${{ inputs.max_binary_size_kb }}")
+        fi
+        python -m repo_size_guardian "${args[@]}"
 
 branding:
   icon: 'shield'

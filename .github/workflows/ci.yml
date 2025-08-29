@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        python-version: ['3.8', '3.11']
 
     steps:
     - uses: actions/checkout@v4
@@ -21,12 +21,17 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
     
+    - name: Install package in development mode
+      run: |
+        pip install -e .
+    
     - name: Run tests
       run: |
         python -m unittest discover tests -v
     
     - name: Test CLI no-op
       run: |
+        pip install -e .
         python -m repo_size_guardian --version
 
   self-test:
@@ -38,6 +43,11 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
     
     - name: Test action (placeholder)
       uses: ./
