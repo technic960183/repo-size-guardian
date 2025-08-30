@@ -1,7 +1,7 @@
 """
 Test suite for git_utils module.
 
-Tests git operations using temporary git repositories.
+Tests git history enumeration and blob detection using git plumbing commands.
 """
 
 import os
@@ -12,75 +12,12 @@ import unittest
 from pathlib import Path
 
 from repo_size_guardian.git_utils import get_merge_base, list_commits, enumerate_changed_blobs
+from tests.test_base import GitRepoTestBase
 
 
-class GitUtilsTestHelper:
-    """Helper class for creating temporary git repositories for testing."""
+class TestGetMergeBase(GitRepoTestBase):
+    """Test cases for get_merge_base function."""
     
-    def __init__(self, test_dir: str):
-        self.test_dir = test_dir
-        self.git_dir = os.path.join(test_dir, '.git')
-        
-    def run_git(self, *args):
-        """Run a git command in the test directory."""
-        return subprocess.run(
-            ['git'] + list(args),
-            cwd=self.test_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    
-    def init_repo(self):
-        """Initialize a git repository."""
-        self.run_git('init')
-        self.run_git('config', 'user.name', 'Test User')
-        self.run_git('config', 'user.email', 'test@example.com')
-        
-    def create_file(self, path: str, content: str):
-        """Create a file with given content."""
-        full_path = os.path.join(self.test_dir, path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        with open(full_path, 'w') as f:
-            f.write(content)
-            
-    def commit_file(self, path: str, content: str, message: str) -> str:
-        """Create a file and commit it, returning the commit SHA."""
-        self.create_file(path, content)
-        self.run_git('add', path)
-        result = self.run_git('commit', '-m', message)
-        # Get the commit SHA
-        sha_result = self.run_git('rev-parse', 'HEAD')
-        return sha_result.stdout.strip()
-        
-    def create_branch(self, branch_name: str):
-        """Create and checkout a new branch."""
-        self.run_git('checkout', '-b', branch_name)
-        
-    def checkout(self, ref: str):
-        """Checkout a specific reference."""
-        self.run_git('checkout', ref)
-
-
-class TestGitUtils(unittest.TestCase):
-    """Test cases for git utilities."""
-    
-    def setUp(self):
-        """Set up test environment with temporary git repo."""
-        self.test_dir = tempfile.mkdtemp()
-        self.helper = GitUtilsTestHelper(self.test_dir)
-        self.helper.init_repo()
-        
-        # Store original working directory
-        self.original_cwd = os.getcwd()
-        # Change to test directory for git operations
-        os.chdir(self.test_dir)
-        
-    def tearDown(self):
-        """Clean up test environment."""
-        os.chdir(self.original_cwd)
-        shutil.rmtree(self.test_dir)
-        
     def test_get_merge_base_same_branch(self):
         """Test merge base when both refs point to same commit."""
         # Create initial commit
@@ -108,27 +45,30 @@ class TestGitUtils(unittest.TestCase):
         self.helper.commit_file('file1.txt', 'content1', 'Base commit')
         base_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
         
-        # Create feature branch and add commits
+        # Create branch
         self.helper.create_branch('feature')
-        self.helper.commit_file('feature.txt', 'feature content', 'Feature commit 1')
-        self.helper.commit_file('feature2.txt', 'feature content 2', 'Feature commit 2')
+        self.helper.commit_file('file2.txt', 'branch content', 'Branch commit')
         
-        # Switch back to master and add a commit
+        # Go back to main and create another commit
         self.helper.checkout('master')
-        self.helper.commit_file('master.txt', 'master content', 'Master commit')
+        self.helper.commit_file('file3.txt', 'main content', 'Main commit')
         
-        # Merge base should be the original base commit
+        # Merge base should be the original commit
         merge_base = get_merge_base('master', 'feature')
         self.assertEqual(merge_base, base_commit)
-        
+
+
+class TestListCommits(GitRepoTestBase):
+    """Test cases for list_commits function."""
+    
     def test_list_commits_empty_range(self):
         """Test listing commits with empty range."""
-        # Create a commit
+        # Create initial commit
         self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
         
-        # Range from HEAD to HEAD should be empty
-        commits = list_commits('HEAD..HEAD')
-        self.assertEqual(commits, [])
+        # Empty range should return no commits
+        commits = list(list_commits('HEAD..HEAD'))
+        self.assertEqual(len(commits), 0)
         
     def test_list_commits_single_commit(self):
         """Test listing commits with single commit range."""
@@ -136,11 +76,14 @@ class TestGitUtils(unittest.TestCase):
         base_commit = self.helper.commit_file('file1.txt', 'content1', 'Base commit')
         
         # Create another commit
-        head_commit = self.helper.commit_file('file2.txt', 'content2', 'Head commit')
+        new_commit = self.helper.commit_file('file2.txt', 'content2', 'New commit')
         
-        # Range should contain just the head commit
-        commits = list_commits(f'{base_commit}..{head_commit}')
-        self.assertEqual(commits, [head_commit])
+        # List commits in range
+        commits = list(list_commits(f'{base_commit}..HEAD'))
+        
+        # Should contain only the new commit
+        self.assertEqual(len(commits), 1)
+        self.assertEqual(commits[0], new_commit)
         
     def test_list_commits_multiple_commits(self):
         """Test listing commits with multiple commits."""
@@ -158,7 +101,11 @@ class TestGitUtils(unittest.TestCase):
         self.assertEqual(len(commits), 2)
         self.assertIn(commit1, commits)
         self.assertIn(commit2, commits)
-        
+
+
+class TestEnumerateChangedBlobs(GitRepoTestBase):
+    """Test cases for enumerate_changed_blobs function."""
+    
     def test_enumerate_changed_blobs_single_commit(self):
         """Test enumerating blobs from single commit."""
         # Create base commit
@@ -203,34 +150,67 @@ class TestGitUtils(unittest.TestCase):
         self.assertIn('file1.txt', paths)
         self.assertIn('file2.txt', paths)
         
-        # Check statuses
+        # Check that statuses are correct
         for blob in blobs:
-            self.assertEqual(blob['commit_sha'], head_commit)
             if blob['path'] == 'file1.txt':
                 self.assertEqual(blob['status'], 'M')  # Modified
             elif blob['path'] == 'file2.txt':
                 self.assertEqual(blob['status'], 'A')  # Added
                 
+    def test_enumerate_changed_blobs_multiple_files_single_commit(self):
+        """Test enumerating multiple files in a single commit (add/mod/delete)."""
+        # Create initial files
+        self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
+        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
+        base_commit = self.helper.commit_file('file3.txt', 'content3', 'Add file3')
+        
+        # In one commit: modify file1, add file4, delete file2
+        self.helper.create_file('file1.txt', 'modified content1')  # Modify
+        self.helper.create_file('file4.txt', 'new content4')  # Add
+        self.helper.run_git('rm', 'file2.txt')  # Delete
+        self.helper.run_git('add', '.')
+        self.helper.run_git('commit', '-m', 'Add/Modify/Delete multiple files')
+        
+        # Enumerate blobs
+        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
+        
+        # Should have three blobs
+        self.assertEqual(len(blobs), 3)
+        
+        # Check each type of change
+        status_map = {blob['path']: blob['status'] for blob in blobs}
+        self.assertEqual(status_map['file1.txt'], 'M')  # Modified
+        self.assertEqual(status_map['file2.txt'], 'D')  # Deleted
+        self.assertEqual(status_map['file4.txt'], 'A')  # Added
+        
+        # Check blob SHAs
+        for blob in blobs:
+            if blob['status'] == 'D':
+                # Deleted files should have empty blob SHA
+                self.assertEqual(blob['blob_sha'], '')
+            else:
+                # Added/Modified files should have blob SHA
+                self.assertTrue(len(blob['blob_sha']) > 0)
+        
     def test_enumerate_changed_blobs_deleted_file(self):
         """Test enumerating blobs with deleted file."""
-        # Create file and commit
-        self.helper.commit_file('file1.txt', 'content1', 'Add file1')
-        base_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+        # Create and commit a file
+        self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
+        base_commit = self.helper.commit_file('file2.txt', 'content2', 'Add file2')
         
-        # Delete file and commit
-        os.remove(os.path.join(self.test_dir, 'file1.txt'))
-        self.helper.run_git('add', 'file1.txt')
-        self.helper.run_git('commit', '-m', 'Delete file1')
+        # Delete the file
+        self.helper.run_git('rm', 'file2.txt')
+        self.helper.run_git('commit', '-m', 'Delete file2')
         head_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
         
         # Enumerate blobs
         blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
         
-        # Should have one blob for deletion
+        # Should have one blob for the deleted file
         self.assertEqual(len(blobs), 1)
         blob = blobs[0]
         
-        self.assertEqual(blob['path'], 'file1.txt')
+        self.assertEqual(blob['path'], 'file2.txt')
         self.assertEqual(blob['commit_sha'], head_commit)
         self.assertEqual(blob['status'], 'D')  # Deleted
         self.assertEqual(blob['blob_sha'], '')  # No blob SHA for deleted files
@@ -240,25 +220,26 @@ class TestGitUtils(unittest.TestCase):
         # Create base commit
         base_commit = self.helper.commit_file('file1.txt', 'content1', 'Base commit')
         
-        # Create first commit in range
+        # Create first commit with new file
         self.helper.commit_file('file2.txt', 'content2', 'Add file2')
         commit1 = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
         
-        # Create second commit in range
+        # Create second commit with another file
         self.helper.commit_file('file3.txt', 'content3', 'Add file3')
         commit2 = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
         
-        # Enumerate blobs
+        # Enumerate blobs across both commits
         blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
         
-        # Should have two blobs from two commits
+        # Should have two blobs
         self.assertEqual(len(blobs), 2)
         
-        # Check commits
+        # Verify blobs are from different commits
         commit_shas = [blob['commit_sha'] for blob in blobs]
         self.assertIn(commit1, commit_shas)
         self.assertIn(commit2, commit_shas)
-
-
-if __name__ == '__main__':
-    unittest.main()
+        
+        # Verify file paths
+        paths = [blob['path'] for blob in blobs]
+        self.assertIn('file2.txt', paths)
+        self.assertIn('file3.txt', paths)

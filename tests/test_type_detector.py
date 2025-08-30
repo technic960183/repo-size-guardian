@@ -348,6 +348,7 @@ print("Hello, world!")
         
         # Should be detected as binary due to low printable ratio
         self.assertTrue(result['is_binary'])
+        self.assertIn(result['confidence'], ['high', 'medium', 'low'])
         
     def test_large_text_file(self):
         """Test detection of larger text files."""
