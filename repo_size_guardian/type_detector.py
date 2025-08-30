@@ -8,10 +8,10 @@ import subprocess
 import tempfile
 import os
 import string
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List, Any
 
 
-def detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, any]]:
+def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
     """
     Detect file type using OS file --mime command.
     
@@ -79,7 +79,7 @@ def detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, any]]:
         return None
 
 
-def detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, any]:
+def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
     """
     Detect file type using content heuristics as fallback.
     
@@ -137,9 +137,18 @@ def detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, any]:
                 threshold = 0.7 if decoding_success else 0.5
                 is_binary = printable_ratio < threshold
                 
-                confidence = 'high' if printable_ratio > 0.9 or printable_ratio < 0.3 else 'medium'
+                # Determine confidence based on printable ratio
+                if printable_ratio > 0.9 or printable_ratio < 0.3:
+                    confidence = 'high'
+                else:
+                    confidence = 'medium'
+                
+                # Adjust confidence if decoding had issues
                 if not decoding_success:
-                    confidence = 'medium' if confidence == 'high' else 'low'
+                    if confidence == 'high':
+                        confidence = 'medium'
+                    else:
+                        confidence = 'low'
                 
                 return {
                     'is_binary': is_binary,
@@ -171,7 +180,7 @@ def detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, any]:
         }
 
 
-def detect_blob_type(blob_sha: str) -> Dict[str, any]:
+def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
     """
     Detect if a blob is binary or text using available methods.
     
@@ -194,15 +203,15 @@ def detect_blob_type(blob_sha: str) -> Dict[str, any]:
         }
     
     # Try file command first
-    file_result = detect_type_with_file_command(blob_sha)
+    file_result = _detect_type_with_file_command(blob_sha)
     if file_result is not None:
         return file_result
     
     # Fallback to content heuristics
-    return detect_type_with_content_heuristics(blob_sha)
+    return _detect_type_with_content_heuristics(blob_sha)
 
 
-def detect_blob_types_batch(blob_shas: list[str]) -> Dict[str, Dict[str, any]]:
+def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     Detect types for multiple blobs.
     
@@ -232,7 +241,7 @@ def detect_blob_types_batch(blob_shas: list[str]) -> Dict[str, Dict[str, any]]:
     return results
 
 
-def augment_blobs_with_types(blobs: list[Dict[str, any]]) -> list[Dict[str, any]]:
+def augment_blobs_with_types(blobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Augment blob records with type detection information.
     

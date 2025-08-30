@@ -16,8 +16,8 @@ from repo_size_guardian.type_detector import (
     detect_blob_type,
     detect_blob_types_batch,
     augment_blobs_with_types,
-    detect_type_with_file_command,
-    detect_type_with_content_heuristics
+    _detect_type_with_file_command,
+    _detect_type_with_content_heuristics
 )
 
 
@@ -320,7 +320,7 @@ print("Hello, world!")
         text_sha = self.helper.create_and_commit_file('text.txt', text_content, 'Add text')
         
         # Test content heuristics directly
-        result = detect_type_with_content_heuristics(text_sha)
+        result = _detect_type_with_content_heuristics(text_sha)
         
         self.assertFalse(result['is_binary'])
         self.assertIsNone(result['mime'])  # Content heuristics don't detect MIME
@@ -331,7 +331,7 @@ print("Hello, world!")
         binary_content = b'Content with \x00 null bytes'
         binary_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary')
         
-        result = detect_type_with_content_heuristics(binary_sha)
+        result = _detect_type_with_content_heuristics(binary_sha)
         
         self.assertTrue(result['is_binary'])
         self.assertEqual(result['confidence'], 'high')  # Null bytes = high confidence
@@ -342,7 +342,7 @@ print("Hello, world!")
         mixed_content = b'Text' + bytes(range(128, 200)) + b'More text'
         mixed_sha = self.helper.create_and_commit_file('mixed.dat', mixed_content, 'Add mixed')
         
-        result = detect_type_with_content_heuristics(mixed_sha)
+        result = _detect_type_with_content_heuristics(mixed_sha)
         
         # Should be detected as binary due to low printable ratio
         self.assertTrue(result['is_binary'])
