@@ -15,8 +15,9 @@ from repo_size_guardian.size_resolver import (
     get_blob_size, 
     get_blob_sizes_batch, 
     augment_blobs_with_sizes,
-    Violation
+    augment_blob_objects_with_sizes
 )
+from repo_size_guardian.models import Violation, Blob
 
 
 class SizeResolverTestHelper:
@@ -83,27 +84,40 @@ class TestSizeResolver(unittest.TestCase):
         
     def test_violation_dataclass(self):
         """Test the Violation dataclass."""
-        violation = Violation(
+        blob = Blob(
             path='test.txt',
             blob_sha='abc123',
             commit_sha='def456',
-            reason='Too large',
+            status='A',
             size_bytes=1024
+        )
+        
+        violation = Violation(
+            blob=blob,
+            rule_name='size_limit',
+            message='File too large',
+            severity='error'
         )
         
         self.assertEqual(violation.path, 'test.txt')
         self.assertEqual(violation.blob_sha, 'abc123')
         self.assertEqual(violation.commit_sha, 'def456')
-        self.assertEqual(violation.reason, 'Too large')
+        self.assertEqual(violation.message, 'File too large')
         self.assertEqual(violation.size_bytes, 1024)
         
     def test_violation_dataclass_optional_size(self):
         """Test Violation dataclass with optional size."""
-        violation = Violation(
+        blob = Blob(
             path='test.txt',
             blob_sha='abc123',
             commit_sha='def456',
-            reason='Disallowed pattern'
+            status='A'
+        )
+        
+        violation = Violation(
+            blob=blob,
+            rule_name='pattern_match',
+            message='Disallowed pattern'
         )
         
         self.assertIsNone(violation.size_bytes)

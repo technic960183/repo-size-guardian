@@ -6,22 +6,8 @@ Provides functions for retrieving blob sizes from git without checkout.
 
 import subprocess
 from typing import Dict, Optional, List, Any
-from dataclasses import dataclass
 
-
-@dataclass
-class Violation:
-    """
-    Minimal violation model placeholder.
-    
-    This is a placeholder for future violation tracking.
-    Will be expanded with actual violation logic in later commits.
-    """
-    path: str
-    blob_sha: str
-    commit_sha: str
-    reason: str
-    size_bytes: Optional[int] = None
+from .models import Blob
     
     
 def get_blob_size(blob_sha: str) -> int:
@@ -112,3 +98,32 @@ def augment_blobs_with_sizes(blobs: List[Dict[str, str]]) -> List[Dict[str, Any]
         augmented_blobs.append(augmented_blob)
     
     return augmented_blobs
+
+
+def augment_blob_objects_with_sizes(blobs: List[Blob]) -> List[Blob]:
+    """
+    Augment Blob objects with size information.
+    
+    Args:
+        blobs: List of Blob objects
+        
+    Returns:
+        List of Blob objects with updated size_bytes field
+    """
+    # Extract unique blob SHAs (excluding empty ones for deleted files)
+    unique_blob_shas = set()
+    for blob in blobs:
+        if blob.blob_sha and not blob.is_deleted:
+            unique_blob_shas.add(blob.blob_sha)
+    
+    # Get sizes for all unique blobs
+    sizes = get_blob_sizes_batch(list(unique_blob_shas))
+    
+    # Update the blob objects
+    for blob in blobs:
+        if blob.blob_sha and blob.blob_sha in sizes:
+            blob.size_bytes = sizes[blob.blob_sha]
+        else:
+            blob.size_bytes = None  # For deleted files or errors
+    
+    return blobs
