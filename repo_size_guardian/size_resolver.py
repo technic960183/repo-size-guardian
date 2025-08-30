@@ -68,38 +68,6 @@ def get_blob_sizes_batch(blob_shas: List[str]) -> Dict[str, int]:
     return sizes
 
 
-def augment_blobs_with_sizes(blobs: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-    """
-    Augment blob records with size information.
-    
-    Args:
-        blobs: List of blob dictionaries from enumerate_changed_blobs
-        
-    Returns:
-        List of blob dictionaries with added 'size_bytes' field
-    """
-    # Extract unique blob SHAs (excluding empty ones for deleted files)
-    unique_blob_shas = set()
-    for blob in blobs:
-        if blob['blob_sha']:
-            unique_blob_shas.add(blob['blob_sha'])
-    
-    # Get sizes for all unique blobs
-    sizes = get_blob_sizes_batch(list(unique_blob_shas))
-    
-    # Augment the original blob records
-    augmented_blobs = []
-    for blob in blobs:
-        augmented_blob = blob.copy()
-        if blob['blob_sha'] and blob['blob_sha'] in sizes:
-            augmented_blob['size_bytes'] = sizes[blob['blob_sha']]
-        else:
-            augmented_blob['size_bytes'] = None  # For deleted files or errors
-        augmented_blobs.append(augmented_blob)
-    
-    return augmented_blobs
-
-
 def augment_blob_objects_with_sizes(blobs: List[Blob]) -> List[Blob]:
     """
     Augment Blob objects with size information.

@@ -139,18 +139,11 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 threshold = 0.7 if decoding_success else 0.5
                 is_binary = printable_ratio < threshold
                 
-                # Determine confidence based on printable ratio
+                # Determine confidence based on printable ratio and if decoding success
                 if printable_ratio > 0.9 or printable_ratio < 0.3:
-                    confidence = 'high'
+                    confidence = 'high' if decoding_success else 'medium'
                 else:
-                    confidence = 'medium'
-                
-                # Adjust confidence if decoding had issues
-                if not decoding_success:
-                    if confidence == 'high':
-                        confidence = 'medium'
-                    else:
-                        confidence = 'low'
+                    confidence = 'medium' if decoding_success else 'low'
                 
                 return {
                     'is_binary': is_binary,
@@ -174,12 +167,8 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
             }
             
     except subprocess.CalledProcessError:
-        # Can't get blob content, assume binary
-        return {
-            'is_binary': True,
-            'mime': None,
-            'confidence': 'low'
-        }
+        # Re-raise git errors for invalid SHAs
+        raise
 
 
 def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
@@ -196,13 +185,13 @@ def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
         - is_binary: bool - True if binary, False if text
         - mime: Optional[str] - MIME type if detected
         - confidence: str - 'high', 'medium', or 'low'
+        
+    Raises:
+        ValueError: If blob_sha is empty or invalid
+        subprocess.CalledProcessError: If git command fails for invalid SHA
     """
     if not blob_sha or not blob_sha.strip():
-        return {
-            'is_binary': True,
-            'mime': None,
-            'confidence': 'low'
-        }
+        raise ValueError("blob_sha cannot be empty")
     
     # Try file command first
     file_result = _detect_type_with_file_command(blob_sha)
@@ -241,48 +230,6 @@ def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
                 continue
     
     return results
-
-
-def augment_blobs_with_types(blobs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Augment blob records with type detection information.
-    
-    Args:
-        blobs: List of blob dictionaries
-        
-    Returns:
-        List of blob dictionaries with added type detection fields:
-        - is_binary, mime_type, type_confidence
-    """
-    # Extract unique blob SHAs (excluding empty ones for deleted files)
-    unique_blob_shas = set()
-    for blob in blobs:
-        if blob.get('blob_sha'):
-            unique_blob_shas.add(blob['blob_sha'])
-    
-    # Detect types for all unique blobs
-    types = detect_blob_types_batch(list(unique_blob_shas))
-    
-    # Augment the original blob records
-    augmented_blobs = []
-    for blob in blobs:
-        augmented_blob = blob.copy()
-        blob_sha = blob.get('blob_sha')
-        
-        if blob_sha and blob_sha in types:
-            type_info = types[blob_sha]
-            augmented_blob['is_binary'] = type_info['is_binary']
-            augmented_blob['mime_type'] = type_info['mime']
-            augmented_blob['type_confidence'] = type_info['confidence']
-        else:
-            # For deleted files or errors
-            augmented_blob['is_binary'] = None
-            augmented_blob['mime_type'] = None
-            augmented_blob['type_confidence'] = None
-            
-        augmented_blobs.append(augmented_blob)
-    
-    return augmented_blobs
 
 
 def augment_blob_objects_with_types(blobs: List[Blob]) -> List[Blob]:

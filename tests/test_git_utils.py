@@ -50,11 +50,11 @@ class TestGetMergeBase(GitRepoTestBase):
         self.helper.commit_file('file2.txt', 'branch content', 'Branch commit')
         
         # Go back to main and create another commit
-        self.helper.checkout('master')
+        self.helper.checkout('main')
         self.helper.commit_file('file3.txt', 'main content', 'Main commit')
         
         # Merge base should be the original commit
-        merge_base = get_merge_base('master', 'feature')
+        merge_base = get_merge_base('main', 'feature')
         self.assertEqual(merge_base, base_commit)
 
 
