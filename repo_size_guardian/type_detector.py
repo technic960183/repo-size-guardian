@@ -10,6 +10,8 @@ import os
 import string
 from typing import Dict, Optional, Tuple, List, Any
 
+from .models import Blob
+
 
 def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
     """
@@ -281,3 +283,38 @@ def augment_blobs_with_types(blobs: List[Dict[str, Any]]) -> List[Dict[str, Any]
         augmented_blobs.append(augmented_blob)
     
     return augmented_blobs
+
+
+def augment_blob_objects_with_types(blobs: List[Blob]) -> List[Blob]:
+    """
+    Augment Blob objects with type detection information.
+    
+    Args:
+        blobs: List of Blob objects
+        
+    Returns:
+        List of Blob objects with updated type detection fields
+    """
+    # Extract unique blob SHAs (excluding empty ones for deleted files)
+    unique_blob_shas = set()
+    for blob in blobs:
+        if blob.blob_sha and not blob.is_deleted:
+            unique_blob_shas.add(blob.blob_sha)
+    
+    # Detect types for all unique blobs
+    types = detect_blob_types_batch(list(unique_blob_shas))
+    
+    # Update the blob objects
+    for blob in blobs:
+        if blob.blob_sha and blob.blob_sha in types:
+            type_info = types[blob.blob_sha]
+            blob.is_binary = type_info['is_binary']
+            blob.mime_type = type_info['mime']
+            blob.type_confidence = type_info['confidence']
+        else:
+            # For deleted files or errors
+            blob.is_binary = None
+            blob.mime_type = None
+            blob.type_confidence = None
+    
+    return blobs

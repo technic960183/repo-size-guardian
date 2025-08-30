@@ -16,9 +16,11 @@ from repo_size_guardian.type_detector import (
     detect_blob_type,
     detect_blob_types_batch,
     augment_blobs_with_types,
+    augment_blob_objects_with_types,
     _detect_type_with_file_command,
     _detect_type_with_content_heuristics
 )
+from repo_size_guardian.models import Blob
 
 
 class TypeDetectorTestHelper:
