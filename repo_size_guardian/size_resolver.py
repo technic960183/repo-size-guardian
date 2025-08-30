@@ -5,7 +5,7 @@ Provides functions for retrieving blob sizes from git without checkout.
 """
 
 import subprocess
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 from dataclasses import dataclass
 
 
@@ -54,7 +54,7 @@ def get_blob_size(blob_sha: str) -> int:
         raise ValueError(f"Invalid size output from git cat-file: {result.stdout}") from e
 
 
-def get_blob_sizes_batch(blob_shas: list[str]) -> Dict[str, int]:
+def get_blob_sizes_batch(blob_shas: List[str]) -> Dict[str, int]:
     """
     Get sizes for multiple blobs efficiently.
     
@@ -70,7 +70,7 @@ def get_blob_sizes_batch(blob_shas: list[str]) -> Dict[str, int]:
     sizes = {}
     
     # For now, call get_blob_size for each blob
-    # This could be optimized with batch git operations in the future
+    # TODO: This could be optimized with batch git operations in the future
     for blob_sha in blob_shas:
         if blob_sha and blob_sha.strip():  # Skip empty blob SHAs (e.g., deleted files)
             try:
@@ -82,7 +82,7 @@ def get_blob_sizes_batch(blob_shas: list[str]) -> Dict[str, int]:
     return sizes
 
 
-def augment_blobs_with_sizes(blobs: list[Dict[str, str]]) -> list[Dict[str, any]]:
+def augment_blobs_with_sizes(blobs: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
     Augment blob records with size information.
     
