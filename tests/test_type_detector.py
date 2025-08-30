@@ -4,86 +4,23 @@ Test suite for type_detector module.
 Tests text vs binary detection using various file types.
 """
 
-import os
-import tempfile
-import shutil
-import subprocess
 import unittest
 import json
-from pathlib import Path
+import subprocess
 
 from repo_size_guardian.type_detector import (
     detect_blob_type,
     detect_blob_types_batch,
-    augment_blobs_with_types,
     augment_blob_objects_with_types,
     _detect_type_with_file_command,
     _detect_type_with_content_heuristics
 )
 from repo_size_guardian.models import Blob
+from tests.test_base import GitRepoTestBase
 
 
-class TypeDetectorTestHelper:
-    """Helper class for creating test blobs of different types."""
-    
-    def __init__(self, test_dir: str):
-        self.test_dir = test_dir
-        
-    def run_git(self, *args):
-        """Run a git command in the test directory."""
-        return subprocess.run(
-            ['git'] + list(args),
-            cwd=self.test_dir,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    
-    def init_repo(self):
-        """Initialize a git repository."""
-        self.run_git('init')
-        self.run_git('config', 'user.name', 'Test User')
-        self.run_git('config', 'user.email', 'test@example.com')
-        
-    def create_and_commit_file(self, path: str, content, message: str) -> str:
-        """Create a file, commit it, and return the blob SHA."""
-        full_path = os.path.join(self.test_dir, path)
-        os.makedirs(os.path.dirname(full_path), exist_ok=True)
-        
-        # Write content (handle both text and binary)
-        if isinstance(content, str):
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-        else:
-            with open(full_path, 'wb') as f:
-                f.write(content)
-                
-        self.run_git('add', path)
-        self.run_git('commit', '-m', message)
-        
-        # Get the blob SHA for this file
-        result = self.run_git('rev-parse', f'HEAD:{path}')
-        return result.stdout.strip()
-
-
-class TestTypeDetector(unittest.TestCase):
+class TestTypeDetector(GitRepoTestBase):
     """Test cases for type detection utilities."""
-    
-    def setUp(self):
-        """Set up test environment with temporary git repo."""
-        self.test_dir = tempfile.mkdtemp()
-        self.helper = TypeDetectorTestHelper(self.test_dir)
-        self.helper.init_repo()
-        
-        # Store original working directory
-        self.original_cwd = os.getcwd()
-        # Change to test directory for git operations
-        os.chdir(self.test_dir)
-        
-    def tearDown(self):
-        """Clean up test environment."""
-        os.chdir(self.original_cwd)
-        shutil.rmtree(self.test_dir)
         
     def test_detect_text_file(self):
         """Test detection of plain text files."""
@@ -192,23 +129,16 @@ print("Hello, world!")
         
     def test_detect_type_invalid_blob_sha(self):
         """Test handling of invalid blob SHA."""
-        result = detect_blob_type('invalid_sha_that_does_not_exist')
-        
-        # Should default to binary with low confidence
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['confidence'], 'low')
+        with self.assertRaises(subprocess.CalledProcessError):
+            detect_blob_type('invalid_sha_that_does_not_exist')
         
     def test_detect_type_empty_blob_sha(self):
         """Test handling of empty blob SHA."""
-        result = detect_blob_type('')
+        with self.assertRaises(ValueError):
+            detect_blob_type('')
         
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['confidence'], 'low')
-        
-        result = detect_blob_type('   ')  # Only whitespace
-        
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['confidence'], 'low')
+        with self.assertRaises(ValueError):
+            detect_blob_type('   ')  # Only whitespace
         
     def test_detect_blob_types_batch(self):
         """Test batch type detection."""
@@ -238,8 +168,8 @@ print("Hello, world!")
         self.assertIn(valid_sha, results)
         self.assertFalse(results[valid_sha]['is_binary'])
         
-    def test_augment_blobs_with_types(self):
-        """Test augmenting blob records with type information."""
+    def test_augment_blob_objects_with_types(self):
+        """Test augmenting Blob objects with type information."""
         # Create test files
         text_content = "Text file content."
         binary_content = b'Binary\x00content'
@@ -247,73 +177,73 @@ print("Hello, world!")
         text_sha = self.helper.create_and_commit_file('text.txt', text_content, 'Add text')
         binary_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary')
         
-        # Create blob records
+        # Create Blob objects
         blobs = [
-            {
-                'path': 'text.txt',
-                'blob_sha': text_sha,
-                'commit_sha': 'commit1',
-                'status': 'A'
-            },
-            {
-                'path': 'binary.bin',
-                'blob_sha': binary_sha,
-                'commit_sha': 'commit2',
-                'status': 'A'
-            }
+            Blob(
+                path='text.txt',
+                blob_sha=text_sha,
+                commit_sha='commit1',
+                status='A'
+            ),
+            Blob(
+                path='binary.bin',
+                blob_sha=binary_sha,
+                commit_sha='commit2',
+                status='A'
+            )
         ]
         
         # Augment with type information
-        augmented = augment_blobs_with_types(blobs)
+        augmented = augment_blob_objects_with_types(blobs)
         
         self.assertEqual(len(augmented), 2)
         
         # Check text file
-        text_blob = next(b for b in augmented if b['path'] == 'text.txt')
-        self.assertFalse(text_blob['is_binary'])
-        self.assertIsNotNone(text_blob['type_confidence'])
+        text_blob = next(b for b in augmented if b.path == 'text.txt')
+        self.assertFalse(text_blob.is_binary)
+        self.assertIsNotNone(text_blob.type_confidence)
         
         # Check binary file
-        binary_blob = next(b for b in augmented if b['path'] == 'binary.bin')
-        self.assertTrue(binary_blob['is_binary'])
-        self.assertIsNotNone(binary_blob['type_confidence'])
+        binary_blob = next(b for b in augmented if b.path == 'binary.bin')
+        self.assertTrue(binary_blob.is_binary)
+        self.assertIsNotNone(binary_blob.type_confidence)
         
-    def test_augment_blobs_with_types_deleted_file(self):
-        """Test augmenting blob records including deleted files."""
+    def test_augment_blob_objects_with_types_deleted_file(self):
+        """Test augmenting Blob objects including deleted files."""
         # Create a text file
         text_content = "Text file content."
         text_sha = self.helper.create_and_commit_file('text.txt', text_content, 'Add text')
         
-        # Create blob records including a deleted file
+        # Create Blob objects including a deleted file
         blobs = [
-            {
-                'path': 'text.txt',
-                'blob_sha': text_sha,
-                'commit_sha': 'commit1',
-                'status': 'A'
-            },
-            {
-                'path': 'deleted.txt',
-                'blob_sha': '',  # Empty for deleted files
-                'commit_sha': 'commit2',
-                'status': 'D'
-            }
+            Blob(
+                path='text.txt',
+                blob_sha=text_sha,
+                commit_sha='commit1',
+                status='A'
+            ),
+            Blob(
+                path='deleted.txt',
+                blob_sha='',  # Empty for deleted files
+                commit_sha='commit2',
+                status='D'
+            )
         ]
         
         # Augment with type information
-        augmented = augment_blobs_with_types(blobs)
+        augmented = augment_blob_objects_with_types(blobs)
         
         self.assertEqual(len(augmented), 2)
         
         # Normal file should have type info
-        text_blob = next(b for b in augmented if b['path'] == 'text.txt')
-        self.assertFalse(text_blob['is_binary'])
+        text_blob = next(b for b in augmented if b.path == 'text.txt')
+        self.assertFalse(text_blob.is_binary)
         
         # Deleted file should have None values
-        deleted_blob = next(b for b in augmented if b['path'] == 'deleted.txt')
-        self.assertIsNone(deleted_blob['is_binary'])
-        self.assertIsNone(deleted_blob['mime_type'])
-        self.assertIsNone(deleted_blob['type_confidence'])
+        deleted_blob = next(b for b in augmented if b.path == 'deleted.txt')
+        self.assertIsNone(deleted_blob.is_binary)
+        self.assertIsNone(deleted_blob.mime_type)
+        self.assertIsNone(deleted_blob.type_confidence)
         
     def test_content_heuristics_fallback(self):
         """Test content heuristics directly."""
@@ -348,7 +278,8 @@ print("Hello, world!")
         
         # Should be detected as binary due to low printable ratio
         self.assertTrue(result['is_binary'])
-        self.assertIn(result['confidence'], ['high', 'medium', 'low'])
+        # With this specific content, we expect medium confidence due to low printable ratio + failed decoding
+        self.assertEqual(result['confidence'], 'medium')
         
     def test_large_text_file(self):
         """Test detection of larger text files."""

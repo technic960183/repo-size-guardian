@@ -31,7 +31,7 @@ class GitRepoTestHelper:
     
     def init_repo(self):
         """Initialize a git repository."""
-        self.run_git('init')
+        self.run_git('init', '--initial-branch=main')
         self.run_git('config', 'user.name', 'Test User')
         self.run_git('config', 'user.email', 'test@example.com')
         
