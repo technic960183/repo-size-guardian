@@ -19,8 +19,8 @@ from repo_size_guardian.models import Blob
 from tests.test_base import GitRepoTestBase
 
 
-class TestTypeDetector(GitRepoTestBase):
-    """Test cases for type detection utilities."""
+class TestDetectBlobType(GitRepoTestBase):
+    """Test cases for detect_blob_type function."""
         
     def test_detect_text_file(self):
         """Test detection of plain text files."""
@@ -127,6 +127,16 @@ print("Hello, world!")
         # Empty files should be considered text
         self.assertFalse(result['is_binary'])
         
+    def test_detect_large_text_file(self):
+        """Test detection of larger text files."""
+        # Create a larger text file
+        content = "Line of text.\n" * 1000  # 1000 lines
+        blob_sha = self.helper.create_and_commit_file('large.txt', content, 'Add large text')
+        
+        result = detect_blob_type(blob_sha)
+        
+        self.assertFalse(result['is_binary'])
+        
     def test_detect_type_invalid_blob_sha(self):
         """Test handling of invalid blob SHA."""
         with self.assertRaises(subprocess.CalledProcessError):
@@ -139,7 +149,11 @@ print("Hello, world!")
         
         with self.assertRaises(ValueError):
             detect_blob_type('   ')  # Only whitespace
-        
+
+
+class TestDetectBlobTypesBatch(GitRepoTestBase):
+    """Test cases for detect_blob_types_batch function."""
+    
     def test_detect_blob_types_batch(self):
         """Test batch type detection."""
         # Create multiple files
@@ -167,7 +181,11 @@ print("Hello, world!")
         self.assertEqual(len(results), 1)
         self.assertIn(valid_sha, results)
         self.assertFalse(results[valid_sha]['is_binary'])
-        
+
+
+class TestAugmentBlobObjectsWithTypes(GitRepoTestBase):
+    """Test cases for augment_blob_objects_with_types function."""
+    
     def test_augment_blob_objects_with_types(self):
         """Test augmenting Blob objects with type information."""
         # Create test files
@@ -244,7 +262,11 @@ print("Hello, world!")
         self.assertIsNone(deleted_blob.is_binary)
         self.assertIsNone(deleted_blob.mime_type)
         self.assertIsNone(deleted_blob.type_confidence)
-        
+
+
+class TestPrivateDetectionMethods(GitRepoTestBase):
+    """Test cases for private detection methods."""
+    
     def test_content_heuristics_fallback(self):
         """Test content heuristics directly."""
         # Create a text file
@@ -281,15 +303,12 @@ print("Hello, world!")
         # With this specific content, we expect medium confidence due to low printable ratio + failed decoding
         self.assertEqual(result['confidence'], 'medium')
         
-    def test_large_text_file(self):
-        """Test detection of larger text files."""
-        # Create a larger text file
-        content = "Line of text.\n" * 1000  # 1000 lines
-        blob_sha = self.helper.create_and_commit_file('large.txt', content, 'Add large text')
+    def test_content_heuristics_invalid_sha(self):
+        """Test content heuristics with invalid SHA returns None."""
+        result = _detect_type_with_content_heuristics('invalid_sha_that_does_not_exist')
         
-        result = detect_blob_type(blob_sha)
-        
-        self.assertFalse(result['is_binary'])
+        # Should return None instead of raising an exception
+        self.assertIsNone(result)
 
 
 if __name__ == '__main__':

@@ -16,8 +16,8 @@ from repo_size_guardian.models import Violation, Blob
 from tests.test_base import GitRepoTestBase
 
 
-class TestSizeResolver(GitRepoTestBase):
-    """Test cases for size resolver utilities."""
+class TestModels(GitRepoTestBase):
+    """Test cases for data models."""
     
     def test_violation_dataclass(self):
         """Test the Violation dataclass."""
@@ -58,7 +58,11 @@ class TestSizeResolver(GitRepoTestBase):
         )
         
         self.assertIsNone(violation.size_bytes)
-        
+
+
+class TestGetBlobSize(GitRepoTestBase):
+    """Test cases for get_blob_size function."""
+    
     def test_get_blob_size_text_file(self):
         """Test getting size of a text file blob."""
         content = "Hello, world!\nThis is a test file.\n"
@@ -106,7 +110,11 @@ class TestSizeResolver(GitRepoTestBase):
             
         with self.assertRaises(ValueError):
             get_blob_size('   ')  # Only whitespace
-            
+
+
+class TestGetBlobSizesBatch(GitRepoTestBase):
+    """Test cases for get_blob_sizes_batch function."""
+    
     def test_get_blob_sizes_batch_multiple_blobs(self):
         """Test getting sizes for multiple blobs in batch."""
         # Create multiple files
@@ -157,7 +165,11 @@ class TestSizeResolver(GitRepoTestBase):
         # Should only contain the blob once with correct size
         self.assertEqual(len(sizes), 1)
         self.assertEqual(sizes[blob_sha], len(content.encode('utf-8')))
-        
+
+
+class TestAugmentBlobObjectsWithSizes(GitRepoTestBase):
+    """Test cases for augment_blob_objects_with_sizes function."""
+    
     def test_augment_blob_objects_with_sizes_single_blob(self):
         """Test augmenting Blob objects with size information."""
         # Create a test file
