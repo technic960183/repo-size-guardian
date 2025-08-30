@@ -167,8 +167,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
             }
             
     except subprocess.CalledProcessError:
-        # Re-raise git errors for invalid SHAs
-        raise
+        return None
 
 
 def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
@@ -199,7 +198,12 @@ def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
         return file_result
     
     # Fallback to content heuristics
-    return _detect_type_with_content_heuristics(blob_sha)
+    heuristic_result = _detect_type_with_content_heuristics(blob_sha)
+    if heuristic_result is not None:
+        return heuristic_result
+    
+    # If both methods failed, the blob SHA is likely invalid
+    raise subprocess.CalledProcessError(1, ['git', 'cat-file'], "invalid blob SHA")
 
 
 def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
