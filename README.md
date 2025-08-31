@@ -1,5 +1,7 @@
 # repo-size-guardian
 
+[![codecov](https://codecov.io/gh/technic960183/repo-size-guardian/graph/badge.svg?token=CODECOV_TOKEN)](https://codecov.io/gh/technic960183/repo-size-guardian)
+
 A GitHub action to prevent large or unwanted files from entering a repository's Git history via Pull Requests (PRs), with configurable, generalized rules.
 
 ## Overview
