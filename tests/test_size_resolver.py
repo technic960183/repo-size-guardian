@@ -4,15 +4,13 @@ Test suite for size_resolver module.
 Tests blob size resolution using git cat-file commands.
 """
 
-import unittest
 import subprocess
+import unittest
 
-from repo_size_guardian.size_resolver import (
-    get_blob_size,
-    get_blob_sizes_batch,
-    augment_blob_objects_with_sizes
-)
-from repo_size_guardian.models import Violation, Blob
+from repo_size_guardian.models import Blob, Violation
+from repo_size_guardian.size_resolver import (augment_blob_objects_with_sizes,
+                                              get_blob_size,
+                                              get_blob_sizes_batch)
 from tests.test_base import GitRepoTestBase
 
 

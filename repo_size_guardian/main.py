@@ -2,8 +2,9 @@
 Main entry point for repo-size-guardian.
 """
 
-import sys
 import argparse
+import sys
+
 from . import __version__
 
 
@@ -13,8 +14,8 @@ def main():
         description="repo-size-guardian: GitHub Action for PR History File & Size Policy"
     )
     parser.add_argument(
-        "--version", 
-        action="version", 
+        "--version",
+        action="version",
         version=f"repo-size-guardian {__version__}"
     )
     parser.add_argument(
@@ -24,7 +25,7 @@ def main():
         help="Maximum size for text files in KB (unlimited if not specified)"
     )
     parser.add_argument(
-        "--max-binary-size-kb", 
+        "--max-binary-size-kb",
         type=int,
         default=None,
         help="Maximum size for binary files in KB (unlimited if not specified)"
@@ -43,7 +44,7 @@ def main():
     parser.add_argument(
         "--scan-mode",
         choices=["history", "diff"],
-        default="history", 
+        default="history",
         help="Scan mode"
     )
     parser.add_argument(
@@ -58,9 +59,9 @@ def main():
         default="true",
         help="Add PR annotations for violations"
     )
-    
+
     args = parser.parse_args()
-    
+
     # No-op for now - just exit successfully
     print(f"repo-size-guardian {__version__} - no-op mode")
     max_text_display = f"{args.max_text_size_kb}KB" if args.max_text_size_kb is not None else "unlimited"

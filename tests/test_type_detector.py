@@ -4,18 +4,14 @@ Test suite for type_detector module.
 Tests text vs binary detection using various file types.
 """
 
-import unittest
 import json
 import subprocess
+import unittest
 
-from repo_size_guardian.type_detector import (
-    detect_blob_type,
-    detect_blob_types_batch,
-    augment_blob_objects_with_types,
-    _detect_type_with_file_command,
-    _detect_type_with_content_heuristics
-)
 from repo_size_guardian.models import Blob
+from repo_size_guardian.type_detector import (
+    _detect_type_with_content_heuristics, _detect_type_with_file_command,
+    augment_blob_objects_with_types, detect_blob_type, detect_blob_types_batch)
 from tests.test_base import GitRepoTestBase
 
 

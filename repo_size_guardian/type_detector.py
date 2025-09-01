@@ -4,11 +4,11 @@ Type detection utilities for determining if blobs are text or binary.
 Provides functions to classify blobs using OS file command and fallback heuristics.
 """
 
-import subprocess
-import tempfile
 import os
 import string
-from typing import Dict, Optional, Tuple, List, Any
+import subprocess
+import tempfile
+from typing import Any, Dict, List, Optional
 
 from .models import Blob
 
@@ -16,10 +16,10 @@ from .models import Blob
 def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
     """
     Detect file type using OS file --mime command.
-    
+
     Args:
         blob_sha: SHA hash of the blob
-        
+
     Returns:
         Dictionary with detection results or None if command fails
         Keys: is_binary, mime, confidence
@@ -34,9 +34,9 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
                 stderr=subprocess.PIPE,
                 check=True
             )
-            
+
             temp_path = temp_file.name
-        
+
         try:
             # Run file --mime -b on the temporary file
             file_result = subprocess.run(
@@ -45,13 +45,13 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
                 text=True,
                 check=True
             )
-            
+
             mime_output = file_result.stdout.strip()
-            
+
             # Parse MIME type
             mime_parts = mime_output.split(';')
             mime_type = mime_parts[0].strip() if mime_parts else mime_output
-            
+
             # Determine if binary based on MIME type
             is_binary = not (
                 mime_type.startswith('text/') or
@@ -63,20 +63,20 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
                     'inode/x-empty'  # Empty files (alternative format)
                 ]
             )
-            
+
             return {
                 'is_binary': is_binary,
                 'mime': mime_type,
                 'confidence': 'high'
             }
-            
+
         finally:
             # Clean up temporary file
             try:
                 os.unlink(temp_path)
             except OSError:
                 pass
-                
+
     except (subprocess.CalledProcessError, OSError):
         return None
 
@@ -84,10 +84,10 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
 def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
     """
     Detect file type using content heuristics as fallback.
-    
+
     Args:
         blob_sha: SHA hash of the blob
-        
+
     Returns:
         Dictionary with detection results
         Keys: is_binary, mime, confidence
@@ -99,9 +99,9 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
             capture_output=True,
             check=True
         )
-        
+
         content = result.stdout
-        
+
         # Check for null bytes (strong indicator of binary)
         if b'\x00' in content:
             return {
@@ -109,7 +109,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 'mime': None,
                 'confidence': 'high'
             }
-            
+
         # If empty, consider it text
         if not content:
             return {
@@ -117,7 +117,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 'mime': None,
                 'confidence': 'medium'
             }
-            
+
         # Try to decode as UTF-8 and check printable ratio
         try:
             # First check how much of the content can be decoded without errors
@@ -128,23 +128,23 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 # If strict decoding fails, use ignore but consider it less text-like
                 text_content = content.decode('utf-8', errors='ignore')
                 decoding_success = False
-            
+
             # Calculate ratio of printable characters
             if text_content:
                 printable_chars = sum(1 for c in text_content if c in string.printable)
                 # Use original byte length for ratio calculation to account for ignored bytes
                 printable_ratio = printable_chars / len(content)
-                
+
                 # Adjust ratio threshold based on decoding success
                 threshold = 0.7 if decoding_success else 0.5
                 is_binary = printable_ratio < threshold
-                
+
                 # Determine confidence based on printable ratio and if decoding success
                 if printable_ratio > 0.9 or printable_ratio < 0.3:
                     confidence = 'high' if decoding_success else 'medium'
                 else:
                     confidence = 'medium' if decoding_success else 'low'
-                
+
                 return {
                     'is_binary': is_binary,
                     'mime': None,
@@ -157,7 +157,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                     'mime': None,
                     'confidence': 'medium'
                 }
-                
+
         except UnicodeDecodeError:
             # Failed to decode as UTF-8, likely binary
             return {
@@ -165,7 +165,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 'mime': None,
                 'confidence': 'high'
             }
-            
+
     except subprocess.CalledProcessError:
         return None
 
@@ -173,35 +173,35 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
 def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
     """
     Detect if a blob is binary or text using available methods.
-    
+
     First tries OS file command, falls back to content heuristics.
-    
+
     Args:
         blob_sha: SHA hash of the blob
-        
+
     Returns:
         Dictionary with keys:
         - is_binary: bool - True if binary, False if text
         - mime: Optional[str] - MIME type if detected
         - confidence: str - 'high', 'medium', or 'low'
-        
+
     Raises:
         ValueError: If blob_sha is empty or invalid
         subprocess.CalledProcessError: If git command fails for invalid SHA
     """
     if not blob_sha or not blob_sha.strip():
         raise ValueError("blob_sha cannot be empty")
-    
+
     # Try file command first
     file_result = _detect_type_with_file_command(blob_sha)
     if file_result is not None:
         return file_result
-    
+
     # Fallback to content heuristics
     heuristic_result = _detect_type_with_content_heuristics(blob_sha)
     if heuristic_result is not None:
         return heuristic_result
-    
+
     # If both methods failed, the blob SHA is likely invalid
     raise subprocess.CalledProcessError(1, ['git', 'cat-file'], "invalid blob SHA")
 
@@ -209,15 +209,15 @@ def detect_blob_type(blob_sha: str) -> Dict[str, Any]:
 def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     Detect types for multiple blobs.
-    
+
     Args:
         blob_shas: List of blob SHA hashes
-        
+
     Returns:
         Dictionary mapping blob SHA to type detection results
     """
     results = {}
-    
+
     for blob_sha in blob_shas:
         if blob_sha and blob_sha.strip():
             # First verify the blob exists by trying to get its content
@@ -232,17 +232,17 @@ def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
             except subprocess.CalledProcessError:
                 # Skip blobs that don't exist
                 continue
-    
+
     return results
 
 
 def augment_blob_objects_with_types(blobs: List[Blob]) -> List[Blob]:
     """
     Augment Blob objects with type detection information.
-    
+
     Args:
         blobs: List of Blob objects
-        
+
     Returns:
         List of Blob objects with updated type detection fields
     """
@@ -251,10 +251,10 @@ def augment_blob_objects_with_types(blobs: List[Blob]) -> List[Blob]:
     for blob in blobs:
         if blob.blob_sha and not blob.is_deleted:
             unique_blob_shas.add(blob.blob_sha)
-    
+
     # Detect types for all unique blobs
     types = detect_blob_types_batch(list(unique_blob_shas))
-    
+
     # Update the blob objects
     for blob in blobs:
         if blob.blob_sha and blob.blob_sha in types:
@@ -267,5 +267,5 @@ def augment_blob_objects_with_types(blobs: List[Blob]) -> List[Blob]:
             blob.is_binary = None
             blob.mime_type = None
             blob.type_confidence = None
-    
+
     return blobs

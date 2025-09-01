@@ -4,14 +4,8 @@ Test suite for git_utils module.
 Tests git history enumeration and blob detection using git plumbing commands.
 """
 
-import os
-import tempfile
-import shutil
-import subprocess
-import unittest
-from pathlib import Path
-
-from repo_size_guardian.git_utils import get_merge_base, list_commits, enumerate_changed_blobs
+from repo_size_guardian.git_utils import (enumerate_changed_blobs,
+                                          get_merge_base, list_commits)
 from tests.test_base import GitRepoTestBase
 
 
