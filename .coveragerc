@@ -1,0 +1,10 @@
+[run]
+source = repo_size_guardian
+branch = true
+
+[report]
+exclude_also =
+    raise NotImplementedError
+
+[xml]
+output = coverage.xml
