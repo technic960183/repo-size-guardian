@@ -3,15 +3,8 @@ source = repo_size_guardian
 branch = true
 
 [report]
-exclude_lines =
-    pragma: no cover
-    def __repr__
-    if self.debug:
-    if settings.DEBUG
-    raise AssertionError
+exclude_also =
     raise NotImplementedError
-    if 0:
-    if __name__ == .__main__.:
 
 [xml]
 output = coverage.xml
