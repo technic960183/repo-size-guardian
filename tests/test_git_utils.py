@@ -1,15 +1,21 @@
 """
 Test suite for git_utils module.
 
-Tests git history enumeration and blob detection using git plumbing commands.
+Tests low-level git operations including cat-file commands,
+commit ranges, and file change detection.
 """
 
 import subprocess
 
-from repo_size_guardian.git_utils import (enumerate_changed_blobs,
-                                          get_merge_base, git_cat_file_content,
-                                          git_cat_file_exists, git_cat_file_size,
-                                          list_commits)
+from repo_size_guardian.git_utils import (
+    get_blob_sha_at_commit,
+    get_diff_files,
+    get_merge_base,
+    git_cat_file_content,
+    git_cat_file_exists,
+    git_cat_file_size,
+    list_commits,
+)
 from tests.test_base import GitRepoTestBase
 
 
@@ -203,143 +209,120 @@ class TestListCommits(GitRepoTestBase):
         self.assertIn(commit2, commits)
 
 
-class TestEnumerateChangedBlobs(GitRepoTestBase):
-    """Test cases for enumerate_changed_blobs function."""
+class TestGetDiffFiles(GitRepoTestBase):
+    """Test cases for get_diff_files function."""
 
-    def test_single_commit(self):
-        """Test enumerating blobs from single commit."""
-        # Create base commit
-        base_commit = self.helper.commit_file('file1.txt', 'content1', 'Base commit')
+    def test_single_file_added(self):
+        """Test getting diff files for a commit that adds one file."""
+        self.helper.commit_file('file1.txt', 'initial', 'Initial commit')
+        commit_sha = self.helper.commit_file('file2.txt', 'content', 'Add file2')
 
-        # Create commit with new file
-        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
-        head_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['status'], 'A')
+        self.assertEqual(files[0]['path'], 'file2.txt')
 
-        # Enumerate blobs
-        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
-
-        # Should have one blob
-        self.assertEqual(len(blobs), 1)
-        blob = blobs[0]
-
-        self.assertEqual(blob['path'], 'file2.txt')
-        self.assertEqual(blob['commit_sha'], head_commit)
-        self.assertEqual(blob['status'], 'A')  # Added
-        self.assertTrue(len(blob['blob_sha']) > 0)  # Should have blob SHA
-
-    def test_multiple_files(self):
-        """Test enumerating blobs with multiple file changes."""
-        # Create base commit
-        base_commit = self.helper.commit_file('file1.txt', 'original content', 'Base commit')
-
-        # Create commit with multiple changes
-        self.helper.create_file('file2.txt', 'new file content')
-        self.helper.create_file('file1.txt', 'modified content')  # Modify existing
+    def test_multiple_files_added(self):
+        """Test getting diff files for a commit that adds multiple files."""
+        self.helper.commit_file('file1.txt', 'initial', 'Initial commit')
+        self.helper.create_file('file2.txt', 'content2')
+        self.helper.create_file('file3.txt', 'content3')
         self.helper.run_git('add', '.')
-        self.helper.run_git('commit', '-m', 'Multiple changes')
-        head_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+        self.helper.run_git('commit', '-m', 'Add multiple files')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
 
-        # Enumerate blobs
-        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
-
-        # Should have two blobs
-        self.assertEqual(len(blobs), 2)
-
-        # Check that we have both files
-        paths = [blob['path'] for blob in blobs]
-        self.assertIn('file1.txt', paths)
-        self.assertIn('file2.txt', paths)
-
-        # Check that statuses are correct
-        for blob in blobs:
-            if blob['path'] == 'file1.txt':
-                self.assertEqual(blob['status'], 'M')  # Modified
-            elif blob['path'] == 'file2.txt':
-                self.assertEqual(blob['status'], 'A')  # Added
-
-    def test_mixed_changes_single_commit(self):
-        """Test enumerating multiple files in a single commit (add/mod/delete)."""
-        # Create initial files
-        self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
-        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
-        base_commit = self.helper.commit_file('file3.txt', 'content3', 'Add file3')
-
-        # In one commit: modify file1, add file4, delete file2
-        self.helper.create_file('file1.txt', 'modified content1')  # Modify
-        self.helper.create_file('file4.txt', 'new content4')  # Add
-        self.helper.run_git('rm', 'file2.txt')  # Delete
-        self.helper.run_git('add', '.')
-        self.helper.run_git('commit', '-m', 'Add/Modify/Delete multiple files')
-
-        # Enumerate blobs
-        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
-
-        # Should have three blobs
-        self.assertEqual(len(blobs), 3)
-
-        # Check each type of change
-        status_map = {blob['path']: blob['status'] for blob in blobs}
-        self.assertEqual(status_map['file1.txt'], 'M')  # Modified
-        self.assertEqual(status_map['file2.txt'], 'D')  # Deleted
-        self.assertEqual(status_map['file4.txt'], 'A')  # Added
-
-        # Check blob SHAs
-        for blob in blobs:
-            if blob['status'] == 'D':
-                # Deleted files should have empty blob SHA
-                self.assertEqual(blob['blob_sha'], '')
-            else:
-                # Added/Modified files should have blob SHA
-                self.assertTrue(len(blob['blob_sha']) > 0)
-
-    def test_deleted_file(self):
-        """Test enumerating blobs with deleted file."""
-        # Create and commit a file
-        self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
-        base_commit = self.helper.commit_file('file2.txt', 'content2', 'Add file2')
-
-        # Delete the file
-        self.helper.run_git('rm', 'file2.txt')
-        self.helper.run_git('commit', '-m', 'Delete file2')
-        head_commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
-
-        # Enumerate blobs
-        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
-
-        # Should have one blob for the deleted file
-        self.assertEqual(len(blobs), 1)
-        blob = blobs[0]
-
-        self.assertEqual(blob['path'], 'file2.txt')
-        self.assertEqual(blob['commit_sha'], head_commit)
-        self.assertEqual(blob['status'], 'D')  # Deleted
-        self.assertEqual(blob['blob_sha'], '')  # No blob SHA for deleted files
-
-    def test_across_multiple_commits(self):
-        """Test enumerating blobs across multiple commits."""
-        # Create base commit
-        base_commit = self.helper.commit_file('file1.txt', 'content1', 'Base commit')
-
-        # Create first commit with new file
-        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
-        commit1 = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
-
-        # Create second commit with another file
-        self.helper.commit_file('file3.txt', 'content3', 'Add file3')
-        commit2 = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
-
-        # Enumerate blobs across both commits
-        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
-
-        # Should have two blobs
-        self.assertEqual(len(blobs), 2)
-
-        # Verify blobs are from different commits
-        commit_shas = [blob['commit_sha'] for blob in blobs]
-        self.assertIn(commit1, commit_shas)
-        self.assertIn(commit2, commit_shas)
-
-        # Verify file paths
-        paths = [blob['path'] for blob in blobs]
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 2)
+        paths = [f['path'] for f in files]
         self.assertIn('file2.txt', paths)
         self.assertIn('file3.txt', paths)
+
+    def test_file_modified(self):
+        """Test getting diff files for a commit that modifies a file."""
+        self.helper.commit_file('file1.txt', 'original', 'Initial commit')
+        commit_sha = self.helper.commit_file('file1.txt', 'modified', 'Modify file1')
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['status'], 'M')
+        self.assertEqual(files[0]['path'], 'file1.txt')
+
+    def test_file_deleted(self):
+        """Test getting diff files for a commit that deletes a file."""
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
+        self.helper.run_git('rm', 'file2.txt')
+        self.helper.run_git('commit', '-m', 'Delete file2')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['status'], 'D')
+        self.assertEqual(files[0]['path'], 'file2.txt')
+
+    def test_initial_commit_no_parent(self):
+        """Test getting diff files for initial commit (has no parent, returns empty)."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+
+        # Initial commits have no parent, so diff-tree returns empty
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 0)
+
+    def test_mixed_changes(self):
+        """Test getting diff files for a commit with mixed changes."""
+        self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
+        self.helper.commit_file('file2.txt', 'content2', 'Add file2')
+        self.helper.create_file('file1.txt', 'modified1')
+        self.helper.create_file('file3.txt', 'content3')
+        self.helper.run_git('rm', 'file2.txt')
+        self.helper.run_git('add', '.')
+        self.helper.run_git('commit', '-m', 'Mixed changes')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 3)
+        status_map = {f['path']: f['status'] for f in files}
+        self.assertEqual(status_map['file1.txt'], 'M')
+        self.assertEqual(status_map['file2.txt'], 'D')
+        self.assertEqual(status_map['file3.txt'], 'A')
+
+
+class TestGetBlobShaAtCommit(GitRepoTestBase):
+    """Test cases for get_blob_sha_at_commit function."""
+
+    def test_existing_file(self):
+        """Test getting blob SHA for an existing file at a commit."""
+        content = 'test content'
+        commit_sha = self.helper.commit_file('file1.txt', content, 'Add file')
+
+        blob_sha = get_blob_sha_at_commit(commit_sha, 'file1.txt')
+        self.assertTrue(len(blob_sha) == 40)  # SHA-1 is 40 hex chars
+        self.assertTrue(all(c in '0123456789abcdef' for c in blob_sha))
+
+    def test_nonexistent_file(self):
+        """Test error when getting blob SHA for non-existent file."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Add file')
+
+        with self.assertRaises(subprocess.CalledProcessError):
+            get_blob_sha_at_commit(commit_sha, 'nonexistent.txt')
+
+    def test_file_at_different_commits(self):
+        """Test getting different blob SHAs when file content changes."""
+        commit1 = self.helper.commit_file('file1.txt', 'version1', 'First version')
+        blob_sha1 = get_blob_sha_at_commit(commit1, 'file1.txt')
+
+        commit2 = self.helper.commit_file('file1.txt', 'version2', 'Second version')
+        blob_sha2 = get_blob_sha_at_commit(commit2, 'file1.txt')
+
+        self.assertNotEqual(blob_sha1, blob_sha2)
+
+    def test_same_content_same_blob(self):
+        """Test that same content produces same blob SHA across commits."""
+        content = 'identical content'
+        commit1 = self.helper.commit_file('file1.txt', content, 'Add file1')
+        blob_sha1 = get_blob_sha_at_commit(commit1, 'file1.txt')
+
+        commit2 = self.helper.commit_file('file2.txt', content, 'Add file2')
+        blob_sha2 = get_blob_sha_at_commit(commit2, 'file2.txt')
+
+        self.assertEqual(blob_sha1, blob_sha2)
