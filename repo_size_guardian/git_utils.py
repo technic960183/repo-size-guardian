@@ -1,13 +1,12 @@
 """
 Git utilities for repository analysis.
 
-Provides functions for computing commit ranges, listing commits,
-and enumerating changed blobs in a PR context.
-Also provides low-level Git operations for accessing blob content and metadata.
+Provides low-level Git operations for accessing blob content, metadata,
+commit ranges, and file changes.
 """
 
 import subprocess
-from typing import Dict, Iterator, List
+from typing import Dict, List
 
 
 def git_cat_file_size(blob_sha: str) -> int:
@@ -138,73 +137,57 @@ def list_commits(commit_range: str) -> List[str]:
     return commits.split('\n')
 
 
-def enumerate_changed_blobs(commit_range: str) -> Iterator[Dict[str, str]]:
+def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
-    Enumerate changed blobs in the given commit range.
+    Get name-status pairs of the changed blobs for a commit compare with its parent.
 
     Args:
-        commit_range: Git commit range (e.g., 'abc123..def456')
+        commit_sha: Commit to inspect
 
-    Yields:
-        Dict with keys: path, blob_sha, commit_sha, status
-        - path: File path
-        - blob_sha: Blob SHA hash
-        - commit_sha: Commit SHA where this change occurred
-        - status: Change status (A=added, M=modified, D=deleted, etc.)
+    Returns:
+        List of dicts with keys: status, path
 
     Raises:
         subprocess.CalledProcessError: If git command fails
     """
-    # Get all commits in the range
-    commits = list_commits(commit_range)
+    result = subprocess.run(
+        ['git', 'diff-tree', '--no-commit-id', '--name-status', '-r', commit_sha],
+        capture_output=True,
+        text=True,
+        check=True
+    )
 
-    for commit_sha in commits:
-        # Use git diff-tree to get changed files in this commit
-        result = subprocess.run(
-            ['git', 'diff-tree', '--no-commit-id', '--name-status', '-r', commit_sha],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+    entries: List[Dict[str, str]] = []
+    out = result.stdout.strip()
+    if not out:
+        return entries
 
-        if not result.stdout.strip():
-            continue
+    for line in out.split('\n'):
+        parts = line.split('\t', 1)
+        if len(parts) != 2:
+            raise ValueError(f"Unexpected diff output format: {line}")
+        entries.append({'status': parts[0], 'path': parts[1]})
+    return entries
 
-        # Parse the output to get status and paths
-        for line in result.stdout.strip().split('\n'):
-            parts = line.split('\t', 1)
-            if len(parts) != 2:
-                continue
 
-            status = parts[0]
-            path = parts[1]
+def get_blob_sha_at_commit(commit_sha: str, path: str) -> str:
+    """
+    Resolve blob SHA for a file path at a given commit.
 
-            # Skip deleted files - we can't get their blob SHA
-            if status.startswith('D'):
-                yield {
-                    'path': path,
-                    'blob_sha': '',
-                    'commit_sha': commit_sha,
-                    'status': status
-                }
-                continue
+    Args:
+        commit_sha: Commit SHA
+        path: File path
 
-            # Get the blob SHA for this file at this commit
-            try:
-                blob_result = subprocess.run(
-                    ['git', 'rev-parse', f'{commit_sha}:{path}'],
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                blob_sha = blob_result.stdout.strip()
+    Returns:
+        The SHA of the blob at the given commit.
 
-                yield {
-                    'path': path,
-                    'blob_sha': blob_sha,
-                    'commit_sha': commit_sha,
-                    'status': status
-                }
-            except subprocess.CalledProcessError:
-                # File might not exist at this commit (edge case)
-                continue
+    Raises:
+        subprocess.CalledProcessError: If git command fails
+    """
+    result = subprocess.run(
+        ['git', 'rev-parse', f'{commit_sha}:{path}'],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    return result.stdout.strip()
