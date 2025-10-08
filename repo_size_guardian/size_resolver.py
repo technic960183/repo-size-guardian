@@ -7,6 +7,7 @@ Provides functions for retrieving blob sizes from git without checkout.
 import subprocess
 from typing import Dict, List
 
+from .git_utils import git_cat_file_size
 from .models import Blob
 
 
@@ -24,20 +25,7 @@ def get_blob_size(blob_sha: str) -> int:
         subprocess.CalledProcessError: If git command fails
         ValueError: If blob_sha is empty or invalid
     """
-    if not blob_sha or not blob_sha.strip():
-        raise ValueError("blob_sha cannot be empty")
-
-    result = subprocess.run(
-        ['git', 'cat-file', '-s', blob_sha],
-        capture_output=True,
-        text=True,
-        check=True
-    )
-
-    try:
-        return int(result.stdout.strip())
-    except ValueError as e:
-        raise ValueError(f"Invalid size output from git cat-file: {result.stdout}") from e
+    return git_cat_file_size(blob_sha)
 
 
 def get_blob_sizes_batch(blob_shas: List[str]) -> Dict[str, int]:

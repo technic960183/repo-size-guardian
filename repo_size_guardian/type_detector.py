@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional
 
+from .git_utils import git_cat_file_content, git_cat_file_exists
 from .models import Blob
 
 
@@ -26,15 +27,10 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
     """
     try:
         # Get blob content and write to temporary file
+        content = git_cat_file_content(blob_sha)
+        
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            # Get blob content using git cat-file
-            result = subprocess.run(
-                ['git', 'cat-file', '-p', blob_sha],
-                stdout=temp_file,
-                stderr=subprocess.PIPE,
-                check=True
-            )
-
+            temp_file.write(content)
             temp_path = temp_file.name
 
         try:
@@ -77,7 +73,7 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
             except OSError:
                 pass
 
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, OSError, ValueError):
         return None
 
 
@@ -94,13 +90,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
     """
     try:
         # Get blob content
-        result = subprocess.run(
-            ['git', 'cat-file', '-p', blob_sha],
-            capture_output=True,
-            check=True
-        )
-
-        content = result.stdout
+        content = git_cat_file_content(blob_sha)
 
         # Check for null bytes (strong indicator of binary)
         if b'\x00' in content:
@@ -166,7 +156,7 @@ def _detect_type_with_content_heuristics(blob_sha: str) -> Dict[str, Any]:
                 'confidence': 'high'
             }
 
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, ValueError):
         return None
 
 
@@ -220,17 +210,13 @@ def detect_blob_types_batch(blob_shas: List[str]) -> Dict[str, Dict[str, Any]]:
 
     for blob_sha in blob_shas:
         if blob_sha and blob_sha.strip():
-            # First verify the blob exists by trying to get its content
+            # First verify the blob exists
             try:
-                subprocess.run(
-                    ['git', 'cat-file', '-e', blob_sha],
-                    capture_output=True,
-                    check=True
-                )
-                # If blob exists, detect its type
-                results[blob_sha] = detect_blob_type(blob_sha)
-            except subprocess.CalledProcessError:
-                # Skip blobs that don't exist
+                if git_cat_file_exists(blob_sha):
+                    # If blob exists, detect its type
+                    results[blob_sha] = detect_blob_type(blob_sha)
+            except (subprocess.CalledProcessError, ValueError):
+                # Skip blobs that don't exist or have errors
                 continue
 
     return results

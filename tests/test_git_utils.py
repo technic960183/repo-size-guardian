@@ -4,9 +4,115 @@ Test suite for git_utils module.
 Tests git history enumeration and blob detection using git plumbing commands.
 """
 
+import subprocess
+
 from repo_size_guardian.git_utils import (enumerate_changed_blobs,
-                                          get_merge_base, list_commits)
+                                          get_merge_base, git_cat_file_content,
+                                          git_cat_file_exists, git_cat_file_size,
+                                          list_commits)
 from tests.test_base import GitRepoTestBase
+
+
+class TestGitCatFileSize(GitRepoTestBase):
+    """Test cases for git_cat_file_size function."""
+
+    def test_text_file(self):
+        """Test getting size of a text file blob."""
+        content = "Hello, world!\nThis is a test file.\n"
+        blob_sha = self.helper.create_and_commit_file('test.txt', content, 'Add test file')
+
+        size = git_cat_file_size(blob_sha)
+        expected_size = len(content.encode('utf-8'))
+        self.assertEqual(size, expected_size)
+
+    def test_empty_file(self):
+        """Test getting size of an empty file."""
+        blob_sha = self.helper.create_and_commit_file('empty.txt', '', 'Add empty file')
+
+        size = git_cat_file_size(blob_sha)
+        self.assertEqual(size, 0)
+
+    def test_binary_file(self):
+        """Test getting size of a binary file."""
+        binary_content = bytes([i % 256 for i in range(100)])
+        blob_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary file')
+
+        size = git_cat_file_size(blob_sha)
+        self.assertEqual(size, len(binary_content))
+
+    def test_invalid_sha(self):
+        """Test error handling for invalid blob SHA."""
+        with self.assertRaises(subprocess.CalledProcessError):
+            git_cat_file_size('invalid_sha_that_does_not_exist')
+
+    def test_empty_sha(self):
+        """Test error handling for empty blob SHA."""
+        with self.assertRaises(ValueError):
+            git_cat_file_size('')
+
+
+class TestGitCatFileContent(GitRepoTestBase):
+    """Test cases for git_cat_file_content function."""
+
+    def test_text_file(self):
+        """Test getting content of a text file."""
+        content = "Hello, world!\nThis is a test file.\n"
+        blob_sha = self.helper.create_and_commit_file('test.txt', content, 'Add test file')
+
+        result = git_cat_file_content(blob_sha)
+        self.assertEqual(result, content.encode('utf-8'))
+
+    def test_binary_file(self):
+        """Test getting content of a binary file."""
+        binary_content = bytes([i % 256 for i in range(100)])
+        blob_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary file')
+
+        result = git_cat_file_content(blob_sha)
+        self.assertEqual(result, binary_content)
+
+    def test_empty_file(self):
+        """Test getting content of an empty file."""
+        blob_sha = self.helper.create_and_commit_file('empty.txt', '', 'Add empty file')
+
+        result = git_cat_file_content(blob_sha)
+        self.assertEqual(result, b'')
+
+    def test_invalid_sha(self):
+        """Test error handling for invalid blob SHA."""
+        with self.assertRaises(subprocess.CalledProcessError):
+            git_cat_file_content('invalid_sha_that_does_not_exist')
+
+    def test_empty_sha(self):
+        """Test error handling for empty blob SHA."""
+        with self.assertRaises(ValueError):
+            git_cat_file_content('')
+
+
+class TestGitCatFileExists(GitRepoTestBase):
+    """Test cases for git_cat_file_exists function."""
+
+    def test_existing_blob(self):
+        """Test checking existence of a valid blob."""
+        content = "Test content"
+        blob_sha = self.helper.create_and_commit_file('test.txt', content, 'Add test file')
+
+        exists = git_cat_file_exists(blob_sha)
+        self.assertTrue(exists)
+
+    def test_nonexistent_blob(self):
+        """Test checking existence of a non-existent blob."""
+        exists = git_cat_file_exists('0000000000000000000000000000000000000000')
+        self.assertFalse(exists)
+
+    def test_invalid_sha(self):
+        """Test checking existence with invalid SHA format."""
+        exists = git_cat_file_exists('invalid_sha')
+        self.assertFalse(exists)
+
+    def test_empty_sha(self):
+        """Test error handling for empty blob SHA."""
+        with self.assertRaises(ValueError):
+            git_cat_file_exists('')
 
 
 class TestGetMergeBase(GitRepoTestBase):

@@ -7,6 +7,7 @@ Tests text vs binary detection using various file types.
 import json
 import subprocess
 import unittest
+from unittest.mock import patch, MagicMock
 
 from repo_size_guardian.models import Blob
 from repo_size_guardian.type_detector import (
@@ -305,6 +306,193 @@ class TestPrivateDetectionMethods(GitRepoTestBase):
 
         # Should return None instead of raising an exception
         self.assertIsNone(result)
+
+
+class TestDetectTypeWithFileCommandWithMock(unittest.TestCase):
+    """Test cases for _detect_type_with_file_command function using mocks."""
+
+    @patch('repo_size_guardian.type_detector.subprocess.run')
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_detects_text_file(self, mock_git_cat_file_content, mock_subprocess_run):
+        """Test detection of text files using file command."""
+        mock_git_cat_file_content.return_value = b'Hello, world!'
+        mock_subprocess_run.return_value = MagicMock(stdout='text/plain; charset=utf-8')
+        
+        result = _detect_type_with_file_command('sha123')
+        
+        self.assertFalse(result['is_binary'])
+        self.assertEqual(result['mime'], 'text/plain')
+        self.assertEqual(result['confidence'], 'high')
+
+    @patch('repo_size_guardian.type_detector.subprocess.run')
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_detects_binary_file(self, mock_git_cat_file_content, mock_subprocess_run):
+        """Test detection of binary files using file command."""
+        mock_git_cat_file_content.return_value = b'\x00\x01\x02\x03'
+        mock_subprocess_run.return_value = MagicMock(stdout='application/octet-stream')
+        
+        result = _detect_type_with_file_command('sha123')
+        
+        self.assertTrue(result['is_binary'])
+        self.assertEqual(result['mime'], 'application/octet-stream')
+
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_returns_none_on_error(self, mock_git_cat_file_content):
+        """Test that None is returned on errors."""
+        mock_git_cat_file_content.side_effect = subprocess.CalledProcessError(1, ['git'])
+        
+        result = _detect_type_with_file_command('sha123')
+        
+        self.assertIsNone(result)
+
+
+class TestDetectTypeWithContentHeuristicsWithMock(unittest.TestCase):
+    """Test cases for _detect_type_with_content_heuristics function using mocks."""
+
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_detects_text_file(self, mock_git_cat_file_content):
+        """Test detection of text files using heuristics."""
+        mock_git_cat_file_content.return_value = b'Hello, world! This is text.'
+        
+        result = _detect_type_with_content_heuristics('sha123')
+        
+        self.assertFalse(result['is_binary'])
+        self.assertIsNone(result['mime'])
+
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_detects_binary_with_null_bytes(self, mock_git_cat_file_content):
+        """Test detection of binary files with null bytes."""
+        mock_git_cat_file_content.return_value = b'Binary\x00content'
+        
+        result = _detect_type_with_content_heuristics('sha123')
+        
+        self.assertTrue(result['is_binary'])
+        self.assertEqual(result['confidence'], 'high')
+
+    @patch('repo_size_guardian.type_detector.git_cat_file_content')
+    def test_returns_none_on_error(self, mock_git_cat_file_content):
+        """Test that None is returned on errors."""
+        mock_git_cat_file_content.side_effect = subprocess.CalledProcessError(1, ['git'])
+        
+        result = _detect_type_with_content_heuristics('sha123')
+        
+        self.assertIsNone(result)
+
+
+class TestDetectBlobTypeWithMock(unittest.TestCase):
+    """Test cases for detect_blob_type function using mocks."""
+
+    @patch('repo_size_guardian.type_detector._detect_type_with_file_command')
+    def test_uses_file_command_first(self, mock_file_command):
+        """Test that file command is tried first."""
+        mock_file_command.return_value = {
+            'is_binary': False,
+            'mime': 'text/plain',
+            'confidence': 'high'
+        }
+        
+        result = detect_blob_type('sha123')
+        
+        self.assertFalse(result['is_binary'])
+        self.assertEqual(result['mime'], 'text/plain')
+
+    @patch('repo_size_guardian.type_detector._detect_type_with_content_heuristics')
+    @patch('repo_size_guardian.type_detector._detect_type_with_file_command')
+    def test_falls_back_to_heuristics(self, mock_file_command, mock_heuristics):
+        """Test fallback to content heuristics."""
+        mock_file_command.return_value = None
+        mock_heuristics.return_value = {
+            'is_binary': False,
+            'mime': None,
+            'confidence': 'medium'
+        }
+        
+        result = detect_blob_type('sha123')
+        
+        self.assertFalse(result['is_binary'])
+        self.assertEqual(result['confidence'], 'medium')
+
+    @patch('repo_size_guardian.type_detector._detect_type_with_content_heuristics')
+    @patch('repo_size_guardian.type_detector._detect_type_with_file_command')
+    def test_raises_error_when_both_fail(self, mock_file_command, mock_heuristics):
+        """Test that error is raised when both methods fail."""
+        mock_file_command.return_value = None
+        mock_heuristics.return_value = None
+        
+        with self.assertRaises(subprocess.CalledProcessError):
+            detect_blob_type('sha123')
+
+
+class TestDetectBlobTypesBatchWithMock(unittest.TestCase):
+    """Test cases for detect_blob_types_batch function using mocks."""
+
+    @patch('repo_size_guardian.type_detector.detect_blob_type')
+    @patch('repo_size_guardian.type_detector.git_cat_file_exists')
+    def test_processes_multiple_blobs(self, mock_git_cat_file_exists, mock_detect_blob_type):
+        """Test batch processing of multiple blobs."""
+        mock_git_cat_file_exists.return_value = True
+        mock_detect_blob_type.side_effect = [
+            {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'},
+            {'is_binary': True, 'mime': 'application/octet-stream', 'confidence': 'high'}
+        ]
+        
+        result = detect_blob_types_batch(['sha1', 'sha2'])
+        
+        self.assertEqual(len(result), 2)
+        self.assertFalse(result['sha1']['is_binary'])
+        self.assertTrue(result['sha2']['is_binary'])
+
+    @patch('repo_size_guardian.type_detector.git_cat_file_exists')
+    def test_skips_nonexistent_blobs(self, mock_git_cat_file_exists):
+        """Test that non-existent blobs are skipped."""
+        mock_git_cat_file_exists.side_effect = [True, False]
+        
+        with patch('repo_size_guardian.type_detector.detect_blob_type') as mock_detect:
+            mock_detect.return_value = {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'}
+            
+            result = detect_blob_types_batch(['sha1', 'sha2'])
+            
+            self.assertEqual(len(result), 1)
+            self.assertIn('sha1', result)
+            self.assertNotIn('sha2', result)
+
+
+class TestAugmentBlobObjectsWithTypesWithMock(unittest.TestCase):
+    """Test cases for augment_blob_objects_with_types function using mocks."""
+
+    @patch('repo_size_guardian.type_detector.detect_blob_types_batch')
+    def test_augments_blobs_with_types(self, mock_detect_blob_types_batch):
+        """Test that blobs are augmented with type information."""
+        mock_detect_blob_types_batch.return_value = {
+            'sha1': {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'},
+            'sha2': {'is_binary': True, 'mime': 'application/octet-stream', 'confidence': 'high'}
+        }
+        
+        blobs = [
+            Blob(path='file1.txt', blob_sha='sha1', commit_sha='commit1', status='A'),
+            Blob(path='file2.bin', blob_sha='sha2', commit_sha='commit2', status='A')
+        ]
+        
+        result = augment_blob_objects_with_types(blobs)
+        
+        self.assertFalse(result[0].is_binary)
+        self.assertEqual(result[0].mime_type, 'text/plain')
+        self.assertTrue(result[1].is_binary)
+        self.assertEqual(result[1].mime_type, 'application/octet-stream')
+
+    @patch('repo_size_guardian.type_detector.detect_blob_types_batch')
+    def test_handles_deleted_files(self, mock_detect_blob_types_batch):
+        """Test that deleted files are handled correctly."""
+        mock_detect_blob_types_batch.return_value = {}
+        
+        blobs = [
+            Blob(path='deleted.txt', blob_sha='', commit_sha='commit1', status='D')
+        ]
+        
+        result = augment_blob_objects_with_types(blobs)
+        
+        self.assertIsNone(result[0].is_binary)
+        self.assertIsNone(result[0].mime_type)
 
 
 if __name__ == '__main__':
