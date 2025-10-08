@@ -11,7 +11,6 @@ from unittest.mock import patch, MagicMock
 
 from repo_size_guardian.models import Blob
 from repo_size_guardian.type_detector import (
-    _detect_type_with_content_heuristics, _detect_type_with_file_command,
     augment_blob_objects_with_types, detect_blob_type, detect_blob_types_batch)
 from tests.test_base import GitRepoTestBase
 
@@ -259,124 +258,6 @@ class TestAugmentBlobObjectsWithTypes(GitRepoTestBase):
         self.assertIsNone(deleted_blob.is_binary)
         self.assertIsNone(deleted_blob.mime_type)
         self.assertIsNone(deleted_blob.type_confidence)
-
-
-class TestPrivateDetectionMethods(GitRepoTestBase):
-    """Test cases for private detection methods."""
-
-    def test_content_heuristics_fallback(self):
-        """Test content heuristics directly."""
-        # Create a text file
-        text_content = "Plain text content without special characters."
-        text_sha = self.helper.create_and_commit_file('text.txt', text_content, 'Add text')
-
-        # Test content heuristics directly
-        result = _detect_type_with_content_heuristics(text_sha)
-
-        self.assertFalse(result['is_binary'])
-        self.assertIsNone(result['mime'])  # Content heuristics don't detect MIME
-        self.assertIn(result['confidence'], ['high', 'medium', 'low'])
-
-    def test_content_heuristics_binary_with_null_bytes(self):
-        """Test content heuristics with null bytes."""
-        binary_content = b'Content with \x00 null bytes'
-        binary_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary')
-
-        result = _detect_type_with_content_heuristics(binary_sha)
-
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['confidence'], 'high')  # Null bytes = high confidence
-
-    def test_content_heuristics_low_printable_ratio(self):
-        """Test content heuristics with low printable character ratio."""
-        # Create content with many non-printable characters
-        mixed_content = b'Text' + bytes(range(128, 200)) + b'More text'
-        mixed_sha = self.helper.create_and_commit_file('mixed.dat', mixed_content, 'Add mixed')
-
-        result = _detect_type_with_content_heuristics(mixed_sha)
-
-        # Should be detected as binary due to low printable ratio
-        self.assertTrue(result['is_binary'])
-        # With this specific content, we expect medium confidence due to low printable ratio + failed decoding
-        self.assertEqual(result['confidence'], 'medium')
-
-    def test_content_heuristics_invalid_sha(self):
-        """Test content heuristics with invalid SHA returns None."""
-        result = _detect_type_with_content_heuristics('invalid_sha_that_does_not_exist')
-
-        # Should return None instead of raising an exception
-        self.assertIsNone(result)
-
-
-class TestDetectTypeWithFileCommandWithMock(unittest.TestCase):
-    """Test cases for _detect_type_with_file_command function using mocks."""
-
-    @patch('repo_size_guardian.type_detector.subprocess.run')
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_detects_text_file(self, mock_git_cat_file_content, mock_subprocess_run):
-        """Test detection of text files using file command."""
-        mock_git_cat_file_content.return_value = b'Hello, world!'
-        mock_subprocess_run.return_value = MagicMock(stdout='text/plain; charset=utf-8')
-        
-        result = _detect_type_with_file_command('sha123')
-        
-        self.assertFalse(result['is_binary'])
-        self.assertEqual(result['mime'], 'text/plain')
-        self.assertEqual(result['confidence'], 'high')
-
-    @patch('repo_size_guardian.type_detector.subprocess.run')
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_detects_binary_file(self, mock_git_cat_file_content, mock_subprocess_run):
-        """Test detection of binary files using file command."""
-        mock_git_cat_file_content.return_value = b'\x00\x01\x02\x03'
-        mock_subprocess_run.return_value = MagicMock(stdout='application/octet-stream')
-        
-        result = _detect_type_with_file_command('sha123')
-        
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['mime'], 'application/octet-stream')
-
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_returns_none_on_error(self, mock_git_cat_file_content):
-        """Test that None is returned on errors."""
-        mock_git_cat_file_content.side_effect = subprocess.CalledProcessError(1, ['git'])
-        
-        result = _detect_type_with_file_command('sha123')
-        
-        self.assertIsNone(result)
-
-
-class TestDetectTypeWithContentHeuristicsWithMock(unittest.TestCase):
-    """Test cases for _detect_type_with_content_heuristics function using mocks."""
-
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_detects_text_file(self, mock_git_cat_file_content):
-        """Test detection of text files using heuristics."""
-        mock_git_cat_file_content.return_value = b'Hello, world! This is text.'
-        
-        result = _detect_type_with_content_heuristics('sha123')
-        
-        self.assertFalse(result['is_binary'])
-        self.assertIsNone(result['mime'])
-
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_detects_binary_with_null_bytes(self, mock_git_cat_file_content):
-        """Test detection of binary files with null bytes."""
-        mock_git_cat_file_content.return_value = b'Binary\x00content'
-        
-        result = _detect_type_with_content_heuristics('sha123')
-        
-        self.assertTrue(result['is_binary'])
-        self.assertEqual(result['confidence'], 'high')
-
-    @patch('repo_size_guardian.type_detector.git_cat_file_content')
-    def test_returns_none_on_error(self, mock_git_cat_file_content):
-        """Test that None is returned on errors."""
-        mock_git_cat_file_content.side_effect = subprocess.CalledProcessError(1, ['git'])
-        
-        result = _detect_type_with_content_heuristics('sha123')
-        
-        self.assertIsNone(result)
 
 
 class TestDetectBlobTypeWithMock(unittest.TestCase):
