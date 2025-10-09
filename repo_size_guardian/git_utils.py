@@ -3,10 +3,91 @@ Git utilities for repository analysis.
 
 Provides functions for computing commit ranges, listing commits,
 and enumerating changed blobs in a PR context.
+Also provides low-level Git operations for accessing blob content and metadata.
 """
 
 import subprocess
 from typing import Dict, Iterator, List
+
+
+def git_cat_file_size(blob_sha: str) -> int:
+    """
+    Get the size of a blob using git cat-file -s.
+
+    Args:
+        blob_sha: SHA hash of the blob
+
+    Returns:
+        Size of the blob in bytes
+
+    Raises:
+        subprocess.CalledProcessError: If git command fails
+        ValueError: If blob_sha is empty or invalid
+    """
+    if not blob_sha or not blob_sha.strip():
+        raise ValueError("blob_sha cannot be empty")
+
+    result = subprocess.run(
+        ['git', 'cat-file', '-s', blob_sha],
+        capture_output=True,
+        text=True,
+        check=True
+    )
+
+    try:
+        return int(result.stdout.strip())
+    except ValueError as e:
+        raise ValueError(f"Invalid size output from git cat-file: {result.stdout}") from e
+
+
+def git_cat_file_content(blob_sha: str) -> bytes:
+    """
+    Get the content of a blob using git cat-file -p.
+
+    Args:
+        blob_sha: SHA hash of the blob
+
+    Returns:
+        Content of the blob as bytes
+
+    Raises:
+        subprocess.CalledProcessError: If git command fails
+        ValueError: If blob_sha is empty or invalid
+    """
+    if not blob_sha or not blob_sha.strip():
+        raise ValueError("blob_sha cannot be empty")
+
+    result = subprocess.run(
+        ['git', 'cat-file', '-p', blob_sha],
+        capture_output=True,
+        check=True
+    )
+
+    return result.stdout
+
+
+def git_cat_file_exists(blob_sha: str) -> bool:
+    """
+    Check if a blob exists using git cat-file -e.
+
+    Args:
+        blob_sha: SHA hash of the blob
+
+    Returns:
+        True if the blob exists, False otherwise
+
+    Raises:
+        ValueError: If blob_sha is empty or invalid
+    """
+    if not blob_sha or not blob_sha.strip():
+        raise ValueError("blob_sha cannot be empty")
+
+    result = subprocess.run(
+        ['git', 'cat-file', '-e', blob_sha],
+        capture_output=True
+    )
+
+    return result.returncode == 0
 
 
 def get_merge_base(base_ref: str, head_ref: str) -> str:
