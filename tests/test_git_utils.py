@@ -6,6 +6,7 @@ commit ranges, and file change detection.
 """
 
 import subprocess
+import unittest
 
 from repo_size_guardian.git_utils import (
     get_blob_sha_at_commit,
@@ -267,6 +268,26 @@ class TestGetDiffFiles(GitRepoTestBase):
         # Initial commits have no parent, so diff-tree returns empty
         files = get_diff_files(commit_sha)
         self.assertEqual(len(files), 0)
+
+    @unittest.expectedFailure
+    def test_merge_commit(self):
+        """Test that a merge commit reports the changes it introduces.
+
+        git diff-tree has no single parent to diff a merge against, so without
+        -m/--cc it prints nothing and every change carried by the merge is
+        invisible. Remove the expectedFailure marker once merge commits are
+        handled.
+        """
+        self.helper.commit_file('data.txt', 'base', 'Initial commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('feature.txt', 'from feature', 'Add feature file')
+        self.helper.checkout('main')
+        self.helper.commit_file('main.txt', 'from main', 'Add main file')
+        merge_sha = self.helper.merge_branch('feature', 'Merge feature')
+
+        files = get_diff_files(merge_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['path'], 'feature.txt')
 
     def test_mixed_changes(self):
         """Test getting diff files for a commit with mixed changes."""

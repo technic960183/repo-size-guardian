@@ -141,6 +141,13 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
     Get name-status pairs of the changed blobs for a commit compare with its parent.
 
+    TODO: Merge commits return an empty list. git diff-tree has no single parent
+    to diff a merge against, so without -m/--cc it prints nothing. A blob written
+    while resolving a merge conflict exists in no other commit, so it escapes the
+    scan entirely. See tests/test_git_utils.py::TestGetDiffFiles::test_merge_commit
+    and tests/test_load_branch.py::TestEnumerateChangedBlobs::
+    test_blob_introduced_only_by_merge_commit (both marked expectedFailure).
+
     Args:
         commit_sha: Commit to inspect
 

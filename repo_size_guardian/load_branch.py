@@ -17,6 +17,12 @@ def enumerate_changed_blobs(commit_range: str) -> Iterator[Dict[str, str]]:
     Args:
         commit_range: Git commit range (e.g., 'abc123..def456')
 
+    TODO: This spawns two git processes per changed file (one diff-tree per
+    commit, then one rev-parse per path). Against the PRD target of 10,000
+    changed files that is >10,000 avoidable spawns. `git diff-tree --raw`
+    already reports the post-image blob SHA on the same line as the status,
+    so the per-path rev-parse can be dropped entirely.
+
     Yields:
         Dict with keys: path, blob_sha, commit_sha, status
         - path: File path

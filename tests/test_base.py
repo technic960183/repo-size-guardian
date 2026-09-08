@@ -78,6 +78,20 @@ class GitRepoTestHelper:
         """Checkout a reference."""
         self.run_git('checkout', ref)
 
+    def merge_branch(self, branch: str, message: str) -> str:
+        """Merge a branch without fast-forward, returning the merge commit SHA."""
+        self.run_git('merge', '--no-ff', '-m', message, branch)
+        return self.run_git('rev-parse', 'HEAD').stdout.strip()
+
+    def start_conflicting_merge(self, branch: str):
+        """Begin a merge expected to conflict, leaving the conflict unresolved."""
+        return subprocess.run(
+            ['git', 'merge', '--no-ff', branch],
+            cwd=self.test_dir,
+            capture_output=True,
+            text=True
+        )
+
     def delete_file(self, path: str, message: str) -> str:
         """Delete a file and commit the deletion, returning commit SHA."""
         self.run_git('rm', path)

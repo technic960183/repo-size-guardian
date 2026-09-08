@@ -2,6 +2,8 @@
 Tests for high-level change enumeration in load_branch module.
 """
 
+import unittest
+
 from repo_size_guardian.load_branch import enumerate_changed_blobs
 from tests.test_base import GitRepoTestBase
 
@@ -91,3 +93,29 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
         paths = [b['path'] for b in blobs]
         self.assertIn('file2.txt', paths)
         self.assertIn('file3.txt', paths)
+
+    @unittest.expectedFailure
+    def test_blob_introduced_only_by_merge_commit(self):
+        """Test that a blob created while resolving a merge conflict is enumerated.
+
+        Conflict resolution can write content that exists in no other commit, so
+        the merge commit is the only place the blob appears. Because merge
+        commits are skipped, such a blob is never enumerated and escapes the
+        scan completely. Remove the expectedFailure marker once merge commits
+        are handled.
+        """
+        base_commit = self.helper.commit_file('data.txt', 'base', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('data.txt', 'from feature', 'Change on feature')
+        self.helper.checkout('main')
+        self.helper.commit_file('data.txt', 'from main', 'Change on main')
+
+        self.helper.start_conflicting_merge('feature')
+        self.helper.create_file('data.txt', 'resolved content present in no other commit')
+        self.helper.run_git('add', 'data.txt')
+        self.helper.run_git('commit', '-m', 'Merge feature and resolve conflict')
+
+        resolved_sha = self.helper.run_git('rev-parse', 'HEAD:data.txt').stdout.strip()
+
+        blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
+        self.assertIn(resolved_sha, [b['blob_sha'] for b in blobs])
