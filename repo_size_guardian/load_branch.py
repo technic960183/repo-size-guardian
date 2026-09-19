@@ -7,7 +7,7 @@ clear, typed results without touching subprocess results directly.
 
 from typing import Dict, Iterator
 
-from .git_utils import get_blob_sha_at_commit, get_diff_files, list_commits
+from .git_utils import get_diff_files, list_commits
 
 
 def enumerate_changed_blobs(commit_range: str) -> Iterator[Dict[str, str]]:
@@ -45,14 +45,11 @@ def enumerate_changed_blobs(commit_range: str) -> Iterator[Dict[str, str]]:
                 }
                 continue
 
-            blob_sha = get_blob_sha_at_commit(commit_sha, path)
-
-            # Edge case: file might not exist/addressable at this commit
-            # `get_blob_sha_at_commit` will raise subprocess.CalledProcessError
-
+            # `get_diff_files` already resolves the post-image blob SHA from
+            # `git diff-tree --raw`, so no per-path `git rev-parse` is needed.
             yield {
                 "path": path,
-                "blob_sha": blob_sha,
+                "blob_sha": file["blob_sha"],
                 "commit_sha": commit_sha,
                 "status": status,
             }

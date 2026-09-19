@@ -139,7 +139,12 @@ def list_commits(commit_range: str) -> List[str]:
 
 def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
-    Get name-status pairs of the changed blobs for a commit compare with its parent.
+    Get status, path, and post-image blob SHA for the changed files in a
+    commit compared with its parent.
+
+    Uses `git diff-tree --raw`, which reports each change's post-image blob
+    SHA on the same line as its status, so callers do not need a separate
+    `git rev-parse <commit>:<path>` per file to resolve it.
 
     For a merge commit, the diff is taken against the first parent only, so
     the result reflects the changes the merge itself introduces (including
@@ -150,13 +155,20 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         commit_sha: Commit to inspect
 
     Returns:
-        List of dicts with keys: status, path
+        List of dicts with keys: status, path, blob_sha
+        - status: Change status (A=added, M=modified, D=deleted, etc.)
+        - path: File path
+        - blob_sha: Full 40-character post-image blob SHA. All zeros for
+          deleted files (status starting with 'D').
 
     Raises:
         subprocess.CalledProcessError: If git command fails
+        ValueError: If a line of diff-tree output is not in the expected
+            raw format (e.g. a rename/copy line with two paths, which this
+            function does not request via -M/-C and so does not support)
     """
     result = subprocess.run(
-        ['git', 'diff-tree', '--no-commit-id', '--name-status', '-r',
+        ['git', 'diff-tree', '--no-commit-id', '--raw', '--no-abbrev', '-r',
          '--diff-merges=first-parent', commit_sha],
         capture_output=True,
         text=True,
@@ -169,10 +181,23 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         return entries
 
     for line in out.split('\n'):
-        parts = line.split('\t', 1)
-        if len(parts) != 2:
+        # Raw format: ":<old_mode> <new_mode> <old_sha> <new_sha> <status>\t<path>"
+        meta, sep, path = line.partition('\t')
+        if not sep or not meta.startswith(':'):
             raise ValueError(f"Unexpected diff output format: {line}")
-        entries.append({'status': parts[0], 'path': parts[1]})
+
+        fields = meta[1:].split(' ')
+        if len(fields) != 5:
+            raise ValueError(f"Unexpected diff output format: {line}")
+        _old_mode, _new_mode, _old_sha, new_sha, status = fields
+
+        if '\t' in path:
+            # Rename/copy status (e.g. "R100") carries two tab-separated
+            # paths. This function never requests rename/copy detection, so
+            # a second path here is unexpected.
+            raise ValueError(f"Unexpected diff output format: {line}")
+
+        entries.append({'status': status, 'path': path, 'blob_sha': new_sha})
     return entries
 
 

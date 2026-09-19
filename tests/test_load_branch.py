@@ -2,6 +2,9 @@
 Tests for high-level change enumeration in load_branch module.
 """
 
+import subprocess
+from unittest import mock
+
 from repo_size_guardian.load_branch import enumerate_changed_blobs
 from tests.test_base import GitRepoTestBase
 
@@ -115,3 +118,61 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
 
         blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
         self.assertIn(resolved_sha, [b['blob_sha'] for b in blobs])
+
+
+class TestEnumerateChangedBlobsSpawnCount(GitRepoTestBase):
+    """Locks in the fix for the per-file git process spawn cost.
+
+    enumerate_changed_blobs used to spawn one extra `git rev-parse` process
+    per changed file (via get_blob_sha_at_commit), on top of the one
+    `git diff-tree` per commit. Against the PRD target of 10,000 changed
+    files that is >10,000 avoidable spawns. `git diff-tree --raw` already
+    reports the post-image blob SHA on the same line as the status, so the
+    per-path rev-parse must not happen.
+    """
+
+    def _spawn_count_for_commit_adding_files(self, prefix: str, n_files: int) -> int:
+        """Commit `n_files` new files in one commit, then return how many git
+        processes `enumerate_changed_blobs` spawns while scanning just that
+        commit (setup spawns are not counted)."""
+        base_commit = self.helper.commit_file(f'{prefix}_base.txt', prefix, 'Base commit')
+        for i in range(n_files):
+            self.helper.create_file(f'{prefix}_file{i}.txt', f'content{i}')
+        self.helper.run_git('add', '.')
+        self.helper.run_git('commit', '-m', f'Add {n_files} files')
+
+        real_run = subprocess.run
+        call_count = 0
+
+        def counting_run(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return real_run(*args, **kwargs)
+
+        # Patch the `subprocess.run` name as seen from git_utils, so every git
+        # invocation made on behalf of enumerate_changed_blobs is counted,
+        # while still actually running (via real_run) so the test stays a
+        # real end-to-end check rather than a mock of git's behavior.
+        with mock.patch('repo_size_guardian.git_utils.subprocess.run', side_effect=counting_run):
+            blobs = list(enumerate_changed_blobs(f'{base_commit}..HEAD'))
+
+        self.assertEqual(len(blobs), n_files)
+        return call_count
+
+    def test_spawn_count_does_not_grow_with_changed_file_count(self):
+        """A commit touching many files must cost the same number of git
+        process spawns as a commit touching few files: one git invocation to
+        list the commit, plus one to diff it -- never one per changed file.
+        """
+        few_files_spawns = self._spawn_count_for_commit_adding_files('few', 2)
+        many_files_spawns = self._spawn_count_for_commit_adding_files('many', 20)
+
+        self.assertEqual(
+            few_files_spawns, many_files_spawns,
+            "git process spawn count must not depend on the number of "
+            f"changed files: {few_files_spawns} spawns for 2 files vs "
+            f"{many_files_spawns} spawns for 20 files"
+        )
+        # One list_commits() call (git rev-list) + one get_diff_files() call
+        # (git diff-tree) per commit, regardless of how many files it touches.
+        self.assertEqual(few_files_spawns, 2)
