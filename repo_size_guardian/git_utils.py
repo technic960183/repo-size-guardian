@@ -137,6 +137,24 @@ def list_commits(commit_range: str) -> List[str]:
     return commits.split('\n')
 
 
+def _is_merge_commit(commit_sha: str) -> bool:
+    """
+    Check whether a commit is a merge (i.e. has a second parent).
+
+    Args:
+        commit_sha: Commit to inspect
+
+    Returns:
+        True if the commit has two or more parents, False otherwise
+    """
+    result = subprocess.run(
+        ['git', 'rev-parse', '-q', '--verify', f'{commit_sha}^2'],
+        capture_output=True,
+        text=True
+    )
+    return result.returncode == 0
+
+
 def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
     Get status, path, and post-image blob SHA for the changed files in a
@@ -149,7 +167,9 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     For a merge commit, the diff is taken against the first parent only, so
     the result reflects the changes the merge itself introduces (including
     any conflict resolution), without double-reporting changes from every
-    parent.
+    parent. This is done by resolving the first parent and diffing the two
+    commits explicitly, rather than with `--diff-merges=first-parent`, so
+    that the function works with older Git versions as well.
 
     Args:
         commit_sha: Commit to inspect
@@ -167,16 +187,39 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
             raw format (e.g. a rename/copy line with two paths, which this
             function does not request via -M/-C and so does not support)
     """
+    diff_flags = ['--no-commit-id', '--raw', '--no-abbrev', '-r']
+
     result = subprocess.run(
-        ['git', 'diff-tree', '--no-commit-id', '--raw', '--no-abbrev', '-r',
-         '--diff-merges=first-parent', commit_sha],
+        ['git', 'diff-tree'] + diff_flags + [commit_sha],
         capture_output=True,
         text=True,
         check=True
     )
+    out = result.stdout.strip()
+
+    if not out and _is_merge_commit(commit_sha):
+        # A merge has no single implicit parent to diff against, so the
+        # single-commit form above prints nothing for it. Resolve the first
+        # parent and diff the two commits explicitly instead. This
+        # two-tree-ish form of diff-tree works on every Git version, unlike
+        # `--diff-merges=first-parent`, which needs Git 2.31+ and makes git
+        # fail outright on older versions. The extra processes are only
+        # spawned for merges, so ordinary commits still cost one git call.
+        first_parent = subprocess.run(
+            ['git', 'rev-parse', f'{commit_sha}^1'],
+            capture_output=True,
+            text=True,
+            check=True
+        ).stdout.strip()
+        result = subprocess.run(
+            ['git', 'diff-tree'] + diff_flags + [first_parent, commit_sha],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        out = result.stdout.strip()
 
     entries: List[Dict[str, str]] = []
-    out = result.stdout.strip()
     if not out:
         return entries
 

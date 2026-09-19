@@ -286,6 +286,48 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['path'], 'feature.txt')
 
+    def test_octopus_merge_commit(self):
+        """Test that an octopus merge reports first-parent changes exactly once.
+
+        An octopus merge has three or more parents. Diffing against every
+        parent (e.g. with -m) repeats the same change once per parent, so the
+        diff must be taken against the first parent only.
+        """
+        self.helper.commit_file('data.txt', 'base', 'Initial commit')
+
+        for branch in ('feature1', 'feature2', 'feature3'):
+            self.helper.run_git('checkout', '-b', branch, 'main')
+            self.helper.commit_file(f'{branch}.txt', f'from {branch}', f'Add {branch}')
+
+        self.helper.checkout('main')
+        self.helper.commit_file('main.txt', 'from main', 'Add main file')
+        self.helper.run_git('merge', '--no-ff', '-m', 'Octopus merge',
+                            'feature1', 'feature2', 'feature3')
+        merge_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        # Sanity check: this really is an octopus merge (main + 3 branches).
+        parents = self.helper.run_git(
+            'rev-list', '--parents', '-n', '1', merge_sha
+        ).stdout.split()
+        self.assertEqual(len(parents) - 1, 4)
+
+        files = get_diff_files(merge_sha)
+
+        # Each feature file is reported exactly once; main.txt came from the
+        # first parent and so is not part of the merge's own changes.
+        paths = [f['path'] for f in files]
+        self.assertEqual(
+            sorted(paths),
+            ['feature1.txt', 'feature2.txt', 'feature3.txt']
+        )
+        self.assertEqual(len(paths), len(set(paths)))
+        for entry in files:
+            self.assertEqual(entry['status'], 'A')
+            self.assertEqual(
+                entry['blob_sha'],
+                get_blob_sha_at_commit(merge_sha, entry['path'])
+            )
+
     def test_mixed_changes(self):
         """Test getting diff files for a commit with mixed changes."""
         self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
