@@ -141,6 +141,11 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
     Get name-status pairs of the changed blobs for a commit compare with its parent.
 
+    For a merge commit, the diff is taken against the first parent only, so
+    the result reflects the changes the merge itself introduces (including
+    any conflict resolution), without double-reporting changes from every
+    parent.
+
     Args:
         commit_sha: Commit to inspect
 
@@ -151,7 +156,8 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         subprocess.CalledProcessError: If git command fails
     """
     result = subprocess.run(
-        ['git', 'diff-tree', '--no-commit-id', '--name-status', '-r', commit_sha],
+        ['git', 'diff-tree', '--no-commit-id', '--name-status', '-r',
+         '--diff-merges=first-parent', commit_sha],
         capture_output=True,
         text=True,
         check=True
