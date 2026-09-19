@@ -5,6 +5,7 @@ Tests for high-level change enumeration in load_branch module.
 import subprocess
 from unittest import mock
 
+from repo_size_guardian.git_utils import get_blob_sha_at_commit
 from repo_size_guardian.load_branch import enumerate_changed_blobs
 from tests.test_base import GitRepoTestBase
 
@@ -21,7 +22,12 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
         self.assertEqual(blob['path'], 'file2.txt')
         self.assertEqual(blob['commit_sha'], head_commit)
         self.assertEqual(blob['status'], 'A')
-        self.assertTrue(len(blob['blob_sha']) > 0)
+        # Pin the exact post-image blob, resolved independently of the
+        # diff-tree parsing that produced it.
+        self.assertEqual(
+            blob['blob_sha'],
+            get_blob_sha_at_commit(head_commit, 'file2.txt')
+        )
 
     def test_multiple_files(self):
         base_commit = self.helper.commit_file('file1.txt', 'original content', 'Base commit')
@@ -40,6 +46,17 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
                 self.assertEqual(b['status'], 'M')
             elif b['path'] == 'file2.txt':
                 self.assertEqual(b['status'], 'A')
+            self.assertEqual(
+                b['blob_sha'],
+                get_blob_sha_at_commit(b['commit_sha'], b['path'])
+            )
+        # The modified file's reported blob must be the new content, not the
+        # pre-image blob that was already on the base commit.
+        modified = next(b for b in blobs if b['path'] == 'file1.txt')
+        self.assertNotEqual(
+            modified['blob_sha'],
+            get_blob_sha_at_commit(base_commit, 'file1.txt')
+        )
 
     def test_mixed_changes_single_commit(self):
         self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
@@ -62,7 +79,17 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
             if b['status'] == 'D':
                 self.assertEqual(b['blob_sha'], '')
             else:
-                self.assertTrue(len(b['blob_sha']) > 0)
+                self.assertEqual(
+                    b['blob_sha'],
+                    get_blob_sha_at_commit(b['commit_sha'], b['path'])
+                )
+        # file1.txt was modified, so a pre-image blob also exists for it; the
+        # enumerated blob must be the post-image one.
+        modified = next(b for b in blobs if b['path'] == 'file1.txt')
+        self.assertNotEqual(
+            modified['blob_sha'],
+            get_blob_sha_at_commit(base_commit, 'file1.txt')
+        )
 
     def test_deleted_file(self):
         self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
@@ -94,6 +121,11 @@ class TestEnumerateChangedBlobs(GitRepoTestBase):
         paths = [b['path'] for b in blobs]
         self.assertIn('file2.txt', paths)
         self.assertIn('file3.txt', paths)
+        for b in blobs:
+            self.assertEqual(
+                b['blob_sha'],
+                get_blob_sha_at_commit(b['commit_sha'], b['path'])
+            )
 
     def test_blob_introduced_only_by_merge_commit(self):
         """Test that a blob created while resolving a merge conflict is enumerated.

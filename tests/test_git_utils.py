@@ -221,6 +221,12 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['status'], 'A')
         self.assertEqual(files[0]['path'], 'file2.txt')
+        # The reported SHA must be the post-image blob, resolved here
+        # independently of how get_diff_files parses diff-tree output.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'file2.txt')
+        )
 
     def test_multiple_files_added(self):
         """Test getting diff files for a commit that adds multiple files."""
@@ -236,16 +242,33 @@ class TestGetDiffFiles(GitRepoTestBase):
         paths = [f['path'] for f in files]
         self.assertIn('file2.txt', paths)
         self.assertIn('file3.txt', paths)
+        for entry in files:
+            self.assertEqual(
+                entry['blob_sha'],
+                get_blob_sha_at_commit(commit_sha, entry['path'])
+            )
 
     def test_file_modified(self):
         """Test getting diff files for a commit that modifies a file."""
-        self.helper.commit_file('file1.txt', 'original', 'Initial commit')
+        parent_sha = self.helper.commit_file('file1.txt', 'original', 'Initial commit')
         commit_sha = self.helper.commit_file('file1.txt', 'modified', 'Modify file1')
 
         files = get_diff_files(commit_sha)
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['status'], 'M')
         self.assertEqual(files[0]['path'], 'file1.txt')
+        # For a modification both a pre-image and a post-image blob exist, so
+        # this is where picking the wrong raw field silently reports content
+        # that was never introduced by the commit. Pin the post-image blob,
+        # and assert it is not the pre-image one.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'file1.txt')
+        )
+        self.assertNotEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(parent_sha, 'file1.txt')
+        )
 
     def test_file_deleted(self):
         """Test getting diff files for a commit that deletes a file."""
@@ -285,6 +308,13 @@ class TestGetDiffFiles(GitRepoTestBase):
         files = get_diff_files(merge_sha)
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['path'], 'feature.txt')
+        self.assertEqual(files[0]['status'], 'A')
+        # A merge is diffed against its first parent explicitly, so pin the
+        # post-image blob it reports for that second code path too.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(merge_sha, 'feature.txt')
+        )
 
     def test_octopus_merge_commit(self):
         """Test that an octopus merge reports first-parent changes exactly once.
@@ -345,6 +375,15 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(status_map['file1.txt'], 'M')
         self.assertEqual(status_map['file2.txt'], 'D')
         self.assertEqual(status_map['file3.txt'], 'A')
+        for entry in files:
+            if entry['status'] == 'D':
+                # Deleted paths have no post-image blob; git reports zeros.
+                self.assertEqual(entry['blob_sha'], '0' * 40)
+            else:
+                self.assertEqual(
+                    entry['blob_sha'],
+                    get_blob_sha_at_commit(commit_sha, entry['path'])
+                )
 
 
 class TestGetBlobShaAtCommit(GitRepoTestBase):
