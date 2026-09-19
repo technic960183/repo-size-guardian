@@ -5,8 +5,14 @@ Provides low-level Git operations for accessing blob content, metadata,
 commit ranges, and file changes.
 """
 
+import os
 import subprocess
 from typing import Dict, List
+
+# Tree entry mode of a gitlink (submodule) entry. Its "blob SHA" is a commit
+# SHA in the submodule's own repository and does not name any object in this
+# repository, so such entries are not blobs and are skipped.
+_GITLINK_MODE = '160000'
 
 
 def git_cat_file_size(blob_sha: str) -> int:
@@ -161,8 +167,24 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     commit compared with its parent.
 
     Uses `git diff-tree --raw`, which reports each change's post-image blob
-    SHA on the same line as its status, so callers do not need a separate
+    SHA in the same record as its status, so callers do not need a separate
     `git rev-parse <commit>:<path>` per file to resolve it.
+
+    `--root` is passed so that a parentless (root) commit is reported as a
+    creation of every file in it, instead of producing no output at all; the
+    flag is a no-op for commits that do have a parent.
+
+    Output is requested with `-z`, so records are NUL-separated and paths are
+    printed literally. Without it git would C-quote any path holding
+    non-ASCII bytes or special characters (`caf\\303\\251.txt`), and trailing
+    whitespace in the final path would be indistinguishable from the
+    trailing newline of the output.
+
+    Submodule (gitlink) entries, recognisable by their `160000` post-image
+    mode, are skipped: their SHA is a commit in the submodule's own
+    repository rather than a blob in this one. An entry whose *pre*-image was
+    a gitlink but whose post-image is a regular file (a submodule replaced by
+    a file) is a normal blob change and is reported as usual.
 
     For a merge commit, the diff is taken against the first parent only, so
     the result reflects the changes the merge itself introduces (including
@@ -183,19 +205,18 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
 
     Raises:
         subprocess.CalledProcessError: If git command fails
-        ValueError: If a line of diff-tree output is not in the expected
-            raw format (e.g. a rename/copy line with two paths, which this
+        ValueError: If a record of diff-tree output is not in the expected
+            raw format (e.g. a rename/copy record with two paths, which this
             function does not request via -M/-C and so does not support)
     """
-    diff_flags = ['--no-commit-id', '--raw', '--no-abbrev', '-r']
+    diff_flags = ['--no-commit-id', '--raw', '--no-abbrev', '-r', '--root', '-z']
 
     result = subprocess.run(
         ['git', 'diff-tree'] + diff_flags + [commit_sha],
         capture_output=True,
-        text=True,
         check=True
     )
-    out = result.stdout.strip()
+    out = result.stdout
 
     if not out and _is_merge_commit(commit_sha):
         # A merge has no single implicit parent to diff against, so the
@@ -214,31 +235,51 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         result = subprocess.run(
             ['git', 'diff-tree'] + diff_flags + [first_parent, commit_sha],
             capture_output=True,
-            text=True,
             check=True
         )
-        out = result.stdout.strip()
+        out = result.stdout
 
     entries: List[Dict[str, str]] = []
     if not out:
         return entries
 
-    for line in out.split('\n'):
-        # Raw format: ":<old_mode> <new_mode> <old_sha> <new_sha> <status>\t<path>"
-        meta, sep, path = line.partition('\t')
-        if not sep or not meta.startswith(':'):
-            raise ValueError(f"Unexpected diff output format: {line}")
+    # With -z the output is a flat sequence of NUL-terminated fields, in
+    # which each change contributes two of them:
+    #   ":<old_mode> <new_mode> <old_sha> <new_sha> <status>\0<path>\0"
+    # Splitting on NUL therefore yields alternating metadata and path fields,
+    # plus one empty trailing field from the final terminator. Only that
+    # artifact is dropped: paths themselves are used verbatim, so a filename
+    # ending in whitespace keeps it. Paths are decoded the way the OS decodes
+    # filenames, since -z prints them as the raw bytes they are on disk.
+    fields = [os.fsdecode(field) for field in out.split(b'\0')]
+    if fields and fields[-1] == '':
+        fields.pop()
 
-        fields = meta[1:].split(' ')
-        if len(fields) != 5:
-            raise ValueError(f"Unexpected diff output format: {line}")
-        _old_mode, _new_mode, _old_sha, new_sha, status = fields
+    records = iter(fields)
+    for meta in records:
+        if not meta.startswith(':'):
+            raise ValueError(f"Unexpected diff output format: {meta}")
 
-        if '\t' in path:
-            # Rename/copy status (e.g. "R100") carries two tab-separated
-            # paths. This function never requests rename/copy detection, so
-            # a second path here is unexpected.
-            raise ValueError(f"Unexpected diff output format: {line}")
+        meta_fields = meta[1:].split(' ')
+        if len(meta_fields) != 5:
+            raise ValueError(f"Unexpected diff output format: {meta}")
+        _old_mode, new_mode, _old_sha, new_sha, status = meta_fields
+
+        path = next(records, None)
+        if path is None:
+            raise ValueError(f"Unexpected diff output format: {meta}")
+
+        if status.startswith(('R', 'C')):
+            # Rename/copy status (e.g. "R100") carries two paths, and so
+            # would desynchronise the metadata/path pairing above. This
+            # function never requests rename/copy detection, so such a
+            # status is unexpected.
+            raise ValueError(f"Unexpected diff output format: {meta}")
+
+        if new_mode == _GITLINK_MODE:
+            # Submodule entry: the SHA names a commit in another repository,
+            # not a blob here, so there is nothing for a blob scan to check.
+            continue
 
         entries.append({'status': status, 'path': path, 'blob_sha': new_sha})
     return entries
