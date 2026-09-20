@@ -49,8 +49,16 @@ class ReportConfig:
     Attributes:
         annotate_pr: Whether to emit GitHub workflow-command annotations.
         max_annotations: Maximum number of annotations to emit; 0 means
-            unlimited. Defaults to 50 to avoid overwhelming a PR or hitting
-            GitHub's own rate limits on log annotations.
+            unlimited. Defaults to 10: GitHub's own `actions/toolkit`
+            problem-matchers documentation caps annotations to 10 warnings
+            + 10 errors + 10 notices *per step* (50 per job, summed across
+            steps) -- and this action emits everything from a single step,
+            so 10 errors/10 warnings is the real per-severity budget.
+            Anything past that is dropped by GitHub itself, reportedly
+            non-deterministically, and the `::notice::` "N more
+            suppressed" line this module emits also competes for the
+            notice budget. The job summary is not subject to this cap and
+            always lists every violation.
         step_summary_path: Path to append the Markdown job summary to.
             Defaults to the `GITHUB_STEP_SUMMARY` environment variable
             (unset/empty outside of GitHub Actions, which disables it).
@@ -59,7 +67,7 @@ class ReportConfig:
             outside of GitHub Actions, which disables it).
     """
     annotate_pr: bool = True
-    max_annotations: int = 50
+    max_annotations: int = 10
     step_summary_path: Optional[str] = field(
         default_factory=lambda: os.environ.get('GITHUB_STEP_SUMMARY') or None)
     github_output_path: Optional[str] = field(

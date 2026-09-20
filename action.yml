@@ -30,9 +30,13 @@ inputs:
     required: false
     default: 'true'
   max_annotations:
-    description: 'Maximum number of GitHub annotations to emit (0 = unlimited)'
+    description: >-
+      Maximum number of GitHub annotations to emit (0 = unlimited). GitHub
+      itself caps annotations per step to 10 warnings + 10 errors + 10
+      notices regardless of this setting; the job summary is not subject
+      to that cap and always lists every violation.
     required: false
-    default: '50'
+    default: '10'
   base_ref:
     description: 'Explicit base ref/SHA to diff from (overrides auto-detection)'
     required: false

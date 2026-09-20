@@ -99,9 +99,25 @@ rather than being passed through and rejected.
 | `scan_mode` | `history` \| `diff` | `history` | `history` walks every commit the PR introduces; `diff` looks only at the net change between the **merge-base** and head. See [squash-merge caveat](#scan_mode-and-squash-merges) below. |
 | `dedupe_blobs` | boolean (`"true"`/`"false"`) | `"true"` | Evaluate each unique `(blob SHA, path)` pair once, keeping the earliest commit that introduced it, instead of reporting every occurrence. |
 | `annotate_pr` | boolean (`"true"`/`"false"`) | `"true"` | Emit GitHub workflow-command annotations (`::error::`/`::warning::`) for each violation, in addition to the console log and job summary. |
-| `max_annotations` | number | `50` | Cap on how many annotations to emit (`0` = unlimited). The job summary always lists everything regardless of this cap. Must be non-negative — a negative value exits with code 2 (it is not read as "unlimited"). |
+| `max_annotations` | number | `10` | Cap on how many annotations to emit (`0` = unlimited). The job summary always lists everything regardless of this cap. Must be non-negative — a negative value exits with code 2 (it is not read as "unlimited"). See [Annotation limits](#annotation-limits) below — GitHub enforces its own, lower cap regardless of this setting. |
 | `base_ref` | string | *(auto-detected)* | Explicit base ref/SHA to diff from, overriding auto-detection from the `pull_request` event. Also the only way to run this action on a non-`pull_request` event — see [Limitations](#limitations). |
 | `head_ref` | string | *(auto-detected)* | Explicit head ref/SHA to diff to, overriding auto-detection. |
+
+## Annotation limits
+
+GitHub caps PR annotations to **10 warnings + 10 errors + 10 notices per
+workflow step** (see `actions/toolkit`'s own problem-matchers
+documentation) — and this action emits every annotation from a single
+step, so that per-step cap is the real limit no matter what you set
+`max_annotations` to. Past that cap, GitHub silently drops the rest,
+reportedly non-deterministically as to which ones. The `::notice::` line
+this action prints when the list is truncated (`N more violation(s)
+suppressed...`) competes for that same notice budget too.
+
+**The job summary is not subject to this cap and always lists every
+violation found** — treat it as the complete, authoritative view, and
+the annotations as a convenience for jumping to a violation from the PR
+itself.
 
 ## Outputs
 

@@ -327,9 +327,11 @@ class TestEmitAnnotations(unittest.TestCase):
         output = stream.getvalue()
         self.assertIn('::reason: too big, sorry\n', output)
 
-    def test_max_annotations_default_is_50(self):
+    def test_max_annotations_default_is_10(self):
+        # GitHub caps annotations to 10 warnings + 10 errors + 10 notices
+        # per step, and this action emits everything from one step.
         config = ReportConfig()
-        self.assertEqual(config.max_annotations, 50)
+        self.assertEqual(config.max_annotations, 10)
 
     def test_exactly_max_annotations_emits_no_notice(self):
         violations = [make_violation(path='f{0}.bin'.format(i)) for i in range(50)]

@@ -139,8 +139,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-annotations",
         type=int,
-        default=50,
-        help="Maximum number of GitHub annotations to emit (0 = unlimited)"
+        default=10,
+        help="Maximum number of GitHub annotations to emit (0 = unlimited). "
+             "GitHub itself caps annotations to 10 warnings + 10 errors + "
+             "10 notices per step regardless of this setting; the job "
+             "summary is not subject to that cap."
     )
     return parser
 
