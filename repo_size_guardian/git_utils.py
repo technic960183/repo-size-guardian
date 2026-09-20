@@ -6,13 +6,18 @@ commit ranges, and file changes.
 """
 
 import os
+import re
 import subprocess
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 # Tree entry mode of a gitlink (submodule) entry. Its "blob SHA" is a commit
 # SHA in the submodule's own repository and does not name any object in this
 # repository, so such entries are not blobs and are skipped.
 _GITLINK_MODE = '160000'
+
+#: Any whitespace, which a line-oriented `git cat-file --batch*` protocol
+#: cannot carry in an object name.
+_WHITESPACE_RE = re.compile(r'\s')
 
 
 def git_cat_file_size(blob_sha: str) -> int:
@@ -43,6 +48,74 @@ def git_cat_file_size(blob_sha: str) -> int:
         return int(result.stdout.strip())
     except ValueError as e:
         raise ValueError(f"Invalid size output from git cat-file: {result.stdout}") from e
+
+
+def git_cat_file_sizes_batch(object_names: Sequence[str]) -> Dict[str, int]:
+    """
+    Get the sizes of many objects with a single `git cat-file --batch-check`.
+
+    One `git cat-file -s` per object costs one process spawn per object,
+    which dominates the runtime of a large PR (PRD 4 targets 10,000 files).
+    `--batch-check` reads object names from stdin and writes one result
+    line per input line, so the whole set costs a single process.
+
+    Names are fed and results read via `communicate()`, so neither pipe can
+    fill and deadlock. Objects git cannot resolve are simply absent from
+    the result, matching `get_blob_sizes_batch`'s "skip what we cannot
+    measure" behaviour. A name containing whitespace cannot be expressed in
+    the line-oriented batch protocol and is resolved individually instead.
+
+    Args:
+        object_names: Object names (normally 40-character blob SHAs).
+
+    Returns:
+        Dict mapping each resolvable input name to its size in bytes.
+        Unresolvable names are omitted.
+    """
+    unique_names: List[str] = []
+    seen = set()
+    for name in object_names:
+        if not name or not name.strip() or name in seen:
+            continue
+        seen.add(name)
+        unique_names.append(name)
+
+    batchable = [name for name in unique_names if not _WHITESPACE_RE.search(name)]
+    awkward = [name for name in unique_names if _WHITESPACE_RE.search(name)]
+
+    sizes: Dict[str, int] = {}
+
+    if batchable:
+        result = subprocess.run(
+            ['git', 'cat-file', '--batch-check'],
+            input='\n'.join(batchable) + '\n',
+            capture_output=True,
+            text=True,
+        )
+        lines = result.stdout.splitlines()
+        # `--batch-check` emits exactly one line per input line. If that
+        # ever fails to hold, positional pairing would mis-attribute every
+        # subsequent size, so fall back rather than report wrong numbers.
+        if len(lines) == len(batchable):
+            for name, line in zip(batchable, lines):
+                parts = line.split()
+                # "<oid> <type> <size>", or "<name> missing" / "<name> ambiguous".
+                if len(parts) != 3:
+                    continue
+                try:
+                    sizes[name] = int(parts[2])
+                except ValueError:
+                    continue
+        else:
+            awkward = unique_names
+
+    for name in awkward:
+        try:
+            sizes[name] = git_cat_file_size(name)
+        except (subprocess.CalledProcessError, ValueError):
+            continue
+
+    return sizes
 
 
 def git_cat_file_content(blob_sha: str) -> bytes:

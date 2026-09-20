@@ -4,6 +4,7 @@ Test suite for size_resolver module.
 Tests blob size resolution using git cat-file commands.
 """
 
+import os
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -81,36 +82,99 @@ class TestGetBlobSizeWithMock(unittest.TestCase):
             get_blob_size('')
 
 
-class TestGetBlobSizesBatchWithMock(unittest.TestCase):
-    """Test cases for get_blob_sizes_batch function using mocks."""
+class TestGetBlobSizesBatch(GitRepoTestBase):
+    """
+    Behavioural tests for get_blob_sizes_batch against a real repository.
 
-    @patch('repo_size_guardian.size_resolver.git_cat_file_size')
-    def test_batch_processing(self, mock_git_cat_file_size):
-        """Test batch processing of multiple blobs."""
-        mock_git_cat_file_size.side_effect = [100, 200, 300]
-        
-        result = get_blob_sizes_batch(['sha1', 'sha2', 'sha3'])
-        
+    These replace two earlier tests that mocked `git_cat_file_size` and so
+    only asserted that the function looped over that mock. They assert the
+    same contract (every requested blob measured; unmeasurable ones
+    skipped) against real git output, which also pins the
+    `git cat-file --batch-check` protocol handling the function now relies
+    on: one result line per input line, positionally paired.
+    """
+
+    def test_returns_exact_sizes_for_every_blob(self):
+        contents = ['a', 'bb' * 500, 'c' * 100000]
+        shas = [self.helper.create_and_commit_file('f%d.txt' % i, text, 'Add')
+                for i, text in enumerate(contents)]
+
+        result = get_blob_sizes_batch(shas)
+
         self.assertEqual(len(result), 3)
-        self.assertEqual(result['sha1'], 100)
-        self.assertEqual(result['sha2'], 200)
-        self.assertEqual(result['sha3'], 300)
+        for sha, text in zip(shas, contents):
+            self.assertEqual(result[sha], len(text.encode('utf-8')))
 
-    @patch('repo_size_guardian.size_resolver.git_cat_file_size')
-    def test_handles_errors_gracefully(self, mock_git_cat_file_size):
-        """Test that errors for individual blobs are handled gracefully."""
-        def side_effect(sha):
-            if sha == 'bad_sha':
-                raise subprocess.CalledProcessError(1, ['git'])
-            return 100
-        
-        mock_git_cat_file_size.side_effect = side_effect
-        
-        result = get_blob_sizes_batch(['good_sha', 'bad_sha'])
-        
-        self.assertEqual(len(result), 1)
-        self.assertIn('good_sha', result)
-        self.assertNotIn('bad_sha', result)
+    def test_sizes_are_not_shifted_between_blobs(self):
+        # Positional pairing of batch output with batch input means an
+        # off-by-one would return plausible-looking but wrong sizes for
+        # every blob, which is how a 200 MB file slips past a threshold.
+        sizes = [10, 20, 30, 40, 50]
+        shas = [self.helper.create_and_commit_file('g%d.txt' % n, 'x' * n, 'Add')
+                for n in sizes]
+
+        result = get_blob_sizes_batch(shas)
+
+        self.assertEqual([result[sha] for sha in shas], sizes)
+
+    def test_empty_blob_is_zero_not_missing(self):
+        sha = self.helper.create_and_commit_file('empty.txt', '', 'Add empty')
+        self.assertEqual(get_blob_sizes_batch([sha]), {sha: 0})
+
+    def test_unknown_sha_is_skipped_without_losing_the_others(self):
+        good = self.helper.create_and_commit_file('good.txt', 'hello', 'Add')
+        missing = 'f' * 40
+
+        result = get_blob_sizes_batch([good, missing, 'not_a_sha_at_all'])
+
+        self.assertEqual(result, {good: 5})
+
+    def test_empty_and_blank_shas_are_skipped(self):
+        good = self.helper.create_and_commit_file('good.txt', 'hello', 'Add')
+        result = get_blob_sizes_batch(['', '   ', good])
+        self.assertEqual(result, {good: 5})
+
+    def test_empty_input_list(self):
+        self.assertEqual(get_blob_sizes_batch([]), {})
+
+    def test_duplicate_shas_are_resolved_once_and_returned_once(self):
+        sha = self.helper.create_and_commit_file('dup.txt', 'hello', 'Add')
+        self.assertEqual(get_blob_sizes_batch([sha, sha, sha]), {sha: 5})
+
+    def test_many_blobs_do_not_deadlock_on_pipe_buffers(self):
+        # Feeding thousands of names to a single child process while
+        # reading its output must not fill either pipe and hang; 64 KiB is
+        # the usual pipe buffer, and 3000 names (41 bytes in, ~60 out)
+        # exceed it in both directions.
+        blob_dir = os.path.join(self.test_dir, 'bulk')
+        os.makedirs(blob_dir)
+        paths = []
+        lengths = []
+        for i in range(3000):
+            path = os.path.join(blob_dir, 'f%04d.txt' % i)
+            with open(path, 'w', encoding='utf-8') as handle:
+                handle.write('x' * (i + 1))
+            paths.append(path)
+            lengths.append(i + 1)
+        shas = subprocess.run(
+            ['git', 'hash-object', '-w', '--stdin-paths'],
+            cwd=self.test_dir, input='\n'.join(paths) + '\n',
+            capture_output=True, text=True, check=True).stdout.split()
+        expected = dict(zip(shas, lengths))
+        self.assertEqual(len(expected), 3000)
+
+        result = get_blob_sizes_batch(list(expected))
+
+        self.assertEqual(result, expected)
+
+    def test_revision_syntax_with_whitespace_falls_back(self):
+        # A name with whitespace cannot ride the line-oriented batch
+        # protocol; it must still be resolved rather than silently dropped.
+        self.helper.create_and_commit_file('has space.txt', 'hello', 'Add')
+        commit = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+        name = '%s:has space.txt' % commit
+
+        self.assertEqual(get_blob_sizes_batch([name]), {name: 5})
 
 
 class TestAugmentBlobObjectsWithSizesWithMock(unittest.TestCase):
