@@ -11,6 +11,7 @@ the results (console log, GitHub annotations, job summary, step outputs).
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -471,6 +472,35 @@ def _warn_if_nothing_enforced(policy: Policy, was_found: bool, policy_path: str,
     )
 
 
+def _warn_if_mime_matching_unavailable(policy: Policy) -> None:
+    """
+    Warn if the policy matches on MIME type but `file` is not installed.
+
+    MIME types only ever come from `file --mime`; the content-heuristic
+    fallback reports `mime_type=None`, and `matches_mime(None, ...)` is
+    always False. So on a runner without the `file` command, every
+    `disallow.mime_types` entry and every `match.mime_types` rule silently
+    matches nothing and the scan passes clean -- a false negative that
+    looks exactly like a clean PR. Only warn when the policy actually
+    relies on MIME matching, to keep the log quiet for everyone else.
+
+    Args:
+        policy: The loaded policy.
+    """
+    uses_mime = bool(policy.disallow_mime_types) or any(
+        rule.match_mime_types for rule in policy.rules)
+    if not uses_mime or shutil.which('file') is not None:
+        return
+
+    print(
+        "::warning::repo-size-guardian: your policy matches on MIME types, but "
+        "the `file` command is not available on this runner. MIME detection "
+        "falls back to content heuristics, which report no MIME type, so every "
+        "mime_types entry in your policy will match nothing. Install `file` "
+        "(e.g. `apt-get install -y file`) or match on globs/extensions instead."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -578,6 +608,7 @@ def run(args: argparse.Namespace) -> int:
 
     policy, was_found = load_policy(args.policy_path)
     _warn_if_nothing_enforced(policy, was_found, args.policy_path, args)
+    _warn_if_mime_matching_unavailable(policy)
 
     eval_config = EvaluationConfig(
         max_text_size_kb=args.max_text_size_kb,

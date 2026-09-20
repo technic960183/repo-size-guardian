@@ -573,5 +573,56 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
         self.assertIn('RuntimeError', stderr)
 
 
+class TestMimeMatchingUnavailableWarning(GitRepoTestBase):
+    """
+    MIME matching silently matches nothing without the `file` command.
+
+    `detect_blob_type` only ever produces a mime_type from `file --mime`;
+    the content-heuristic fallback reports None, and matches_mime(None, ...)
+    is always False. On a runner without `file`, a policy built around
+    `disallow.mime_types` would therefore pass every PR clean -- a false
+    negative indistinguishable from a genuinely clean run.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+    def _run_without_file_command(self, policy_text):
+        self.helper.create_file('policy.yml', policy_text)
+        with mock.patch.object(main_module.shutil, 'which', return_value=None):
+            return run_cli(['--base-ref', 'main', '--head-ref', 'feature',
+                            '--policy-path', 'policy.yml'])
+
+    def test_warns_when_policy_uses_disallow_mime_types(self):
+        _exit_code, stdout, _stderr = self._run_without_file_command(
+            "disallow:\n  mime_types: [\"application/x-dosexec\"]\n")
+        self.assertIn('::warning::', stdout)
+        self.assertIn('`file` command', stdout)
+
+    def test_warns_when_a_rule_matches_on_mime_types(self):
+        _exit_code, stdout, _stderr = self._run_without_file_command(
+            "rules:\n"
+            "  - id: no-executables\n"
+            "    match:\n"
+            "      mime_types: [\"application/x-executable\"]\n")
+        self.assertIn('::warning::', stdout)
+
+    def test_no_warning_when_the_policy_does_not_use_mime(self):
+        _exit_code, stdout, _stderr = self._run_without_file_command(
+            "disallow:\n  extensions: [\"exe\"]\n")
+        self.assertNotIn('`file` command', stdout)
+
+    def test_no_warning_when_the_file_command_is_present(self):
+        self.helper.create_file(
+            'policy.yml', "disallow:\n  mime_types: [\"application/x-dosexec\"]\n")
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml'])
+        self.assertNotIn('`file` command', stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
