@@ -29,22 +29,35 @@ inputs:
     description: 'Add PR annotations for violations'
     required: false
     default: 'true'
+  max_annotations:
+    description: 'Maximum number of GitHub annotations to emit (0 = unlimited)'
+    required: false
+    default: '50'
+  base_ref:
+    description: 'Explicit base ref/SHA to diff from (overrides auto-detection)'
+    required: false
+  head_ref:
+    description: 'Explicit head ref/SHA to diff to (overrides auto-detection)'
+    required: false
 
 outputs:
   violations_found:
     description: 'Number of violations found'
+    value: ${{ steps.scan.outputs.violations_found }}
   summary:
     description: 'Summary of scan results'
+    value: ${{ steps.scan.outputs.summary }}
 
 runs:
   using: 'composite'
   steps:
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       with:
         python-version: '3.x'
-    
+
     - name: Run repo-size-guardian
+      id: scan
       shell: bash
       run: |
         cd ${{ github.action_path }}
@@ -55,6 +68,7 @@ runs:
           --scan-mode "${{ inputs.scan_mode }}"
           --dedupe-blobs "${{ inputs.dedupe_blobs }}"
           --annotate-pr "${{ inputs.annotate_pr }}"
+          --max-annotations "${{ inputs.max_annotations }}"
         )
         if [ -n "${{ inputs.max_text_size_kb }}" ]; then
           args+=(--max-text-size-kb "${{ inputs.max_text_size_kb }}")
@@ -62,6 +76,13 @@ runs:
         if [ -n "${{ inputs.max_binary_size_kb }}" ]; then
           args+=(--max-binary-size-kb "${{ inputs.max_binary_size_kb }}")
         fi
+        if [ -n "${{ inputs.base_ref }}" ]; then
+          args+=(--base-ref "${{ inputs.base_ref }}")
+        fi
+        if [ -n "${{ inputs.head_ref }}" ]; then
+          args+=(--head-ref "${{ inputs.head_ref }}")
+        fi
+        cd "${GITHUB_WORKSPACE}"
         python -m repo_size_guardian "${args[@]}"
 
 branding:
