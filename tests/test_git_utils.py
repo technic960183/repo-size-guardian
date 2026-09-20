@@ -6,6 +6,7 @@ commit ranges, and file change detection.
 """
 
 import subprocess
+from unittest import mock
 
 from repo_size_guardian.git_utils import (
     get_blob_sha_at_commit,
@@ -500,6 +501,20 @@ class TestGetDiffFiles(GitRepoTestBase):
                 get_blob_sha_at_commit(merge_sha, entry['path'])
             )
 
+    def test_empty_commit_has_no_changes(self):
+        """Test that a commit identical to its parent reports no files.
+
+        A non-merge, non-root commit with no tree changes makes diff-tree
+        print nothing, so get_diff_files must return an empty list rather
+        than treating that as the merge or malformed-output case.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.run_git('commit', '--allow-empty', '-m', 'Empty commit')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(files, [])
+
     def test_mixed_changes(self):
         """Test getting diff files for a commit with mixed changes."""
         self.helper.commit_file('file1.txt', 'content1', 'Initial commit')
@@ -526,6 +541,73 @@ class TestGetDiffFiles(GitRepoTestBase):
                     entry['blob_sha'],
                     get_blob_sha_at_commit(commit_sha, entry['path'])
                 )
+
+
+class TestGetDiffFilesMalformedOutput(GitRepoTestBase):
+    """Test the raw-format defensive checks in get_diff_files.
+
+    `git diff-tree --raw -z` never actually produces these shapes with the
+    flags this function passes (rename/copy detection is off, and the
+    metadata/path record shape is otherwise fixed), so subprocess.run is
+    patched to return crafted bytes in place of the real diff-tree output,
+    with every other git invocation (e.g. commit setup) still running for
+    real.
+    """
+
+    def _get_diff_files_with_fake_diff_tree_output(self, commit_sha: str, raw_stdout: bytes):
+        real_run = subprocess.run
+
+        def fake_run(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get('args')
+            if cmd[:2] == ['git', 'diff-tree']:
+                return subprocess.CompletedProcess(cmd, 0, stdout=raw_stdout, stderr=b'')
+            return real_run(*args, **kwargs)
+
+        with mock.patch('repo_size_guardian.git_utils.subprocess.run', side_effect=fake_run):
+            return get_diff_files(commit_sha)
+
+    def test_meta_not_starting_with_colon_raises(self):
+        """A metadata field is expected to always start with ':'."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, b'garbage\0path.txt\0')
+
+    def test_meta_with_wrong_field_count_raises(self):
+        """A metadata field must carry exactly 5 space-separated parts."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = b':100644 100644 ' + b'0' * 40 + b' ' + b'1' * 40  # missing status
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, meta + b'\0path.txt\0')
+
+    def test_missing_path_field_raises(self):
+        """A metadata field with no following path field is malformed."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' A').encode()
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, meta + b'\0')
+
+    def test_rename_status_raises(self):
+        """A rename/copy status carries two paths, which this function,
+        never having requested -M/-C, does not support."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' R100').encode()
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(
+                commit_sha, meta + b'\0old.txt\0new.txt\0')
+
+    def test_output_without_trailing_nul_is_still_parsed(self):
+        """The trailing empty field from -z's final NUL is only dropped when
+        present; output missing it must still parse the real records."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' A').encode()
+        raw_stdout = meta + b'\0path.txt'  # no trailing NUL
+
+        files = self._get_diff_files_with_fake_diff_tree_output(commit_sha, raw_stdout)
+        self.assertEqual(files, [{'status': 'A', 'path': 'path.txt', 'blob_sha': '1' * 40}])
 
 
 class TestGetBlobShaAtCommit(GitRepoTestBase):
