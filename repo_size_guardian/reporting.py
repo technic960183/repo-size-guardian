@@ -388,6 +388,28 @@ def emit_annotations(violations: Sequence[Violation], config: ReportConfig,
         )
 
 
+def emit_error_annotation(message: str, stream: TextIO = sys.stdout) -> None:
+    """
+    Emit a single ad-hoc GitHub ``::error::`` annotation.
+
+    Unlike `emit_annotations` (one annotation per `Violation`, with a
+    `file=` property), this is for conditions that are not a policy
+    violation at all — a configuration error or an internal crash in
+    main.py — but that still need to surface prominently in the Actions UI
+    rather than as a plain log line easy to miss inside a (typically
+    collapsed) step. Reuses the same message-escaping as `emit_annotations`
+    so a message containing a literal `%`, CR, or LF renders as one intact
+    annotation instead of corrupting the workflow-command stream or being
+    cut off at the first embedded newline.
+
+    Args:
+        message: Human-readable annotation text. May contain newlines.
+        stream: Stream to write the workflow command to (normally stdout,
+            so the runner picks it up from the job log).
+    """
+    stream.write("::error::{0}\n".format(_escape_annotation_message(message)))
+
+
 def _append_to_file(path: str, content: str) -> None:
     """
     Append text to a file, degrading gracefully on failure.

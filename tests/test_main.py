@@ -240,6 +240,19 @@ class TestShallowClonePreflight(unittest.TestCase):
         self.assertIn('fetch-depth: 0', stderr)
         self.assertIn('shallow', stderr.lower())
 
+    def test_shallow_clone_emits_error_annotation_without_bug_wording(self):
+        # A shallow clone is a configuration mistake (missing
+        # fetch-depth: 0), not a bug in this tool -- it must get the
+        # ::error:: annotation treatment but not the internal-error wording.
+        exit_code, stdout, _stderr = run_cli(['--base-ref', 'HEAD~1', '--head-ref', 'HEAD'])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('::error::', stdout)
+        annotation_line = next(
+            line for line in stdout.splitlines() if line.startswith('::error::'))
+        self.assertIn('fetch-depth', annotation_line)
+        self.assertNotIn('bug', annotation_line.lower())
+        self.assertNotIn('repo-size-guardian/issues', annotation_line)
+
 
 class TestMalformedPolicy(GitRepoTestBase):
     """A malformed policy file is a configuration error: exit code 2."""
@@ -620,6 +633,119 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
         self.assertEqual(exit_code, 2)
         self.assertIn('internal error', stderr)
         self.assertIn('RuntimeError', stderr)
+
+    def test_internal_error_emits_error_annotation_with_version_and_issue_link(self):
+        # A plain log line inside a (typically collapsed) step is easy to
+        # miss; an internal crash must also surface as a GitHub ::error::
+        # annotation, carrying the version (for an actionable bug report)
+        # and a direct link to the issue tracker.
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        with mock.patch.object(main_module, 'evaluate_blobs',
+                               side_effect=RuntimeError('boom')):
+            exit_code, stdout, _stderr = run_cli([
+                '--base-ref', 'main', '--head-ref', 'feature',
+                '--max-text-size-kb', '1000',
+            ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn('::error::', stdout)
+        annotation_line = next(
+            line for line in stdout.splitlines() if line.startswith('::error::'))
+        self.assertIn(main_module.__version__, annotation_line)
+        self.assertIn(
+            'https://github.com/technic960183/repo-size-guardian/issues',
+            annotation_line,
+        )
+        self.assertIn('RuntimeError', annotation_line)
+        self.assertIn('bug', annotation_line.lower())
+
+    def test_internal_error_does_not_leave_partial_github_output_or_summary(self):
+        # report() is only ever reached after the pipeline succeeds, so a
+        # crash earlier in the pipeline (as simulated here) must leave
+        # GITHUB_OUTPUT / GITHUB_STEP_SUMMARY exactly as it found them --
+        # never a partially-written entry a downstream step (e.g. one
+        # gated on `if: always()`) could misread as real scan results.
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = os.path.join(tmp_dir, 'github_output')
+            summary_path = os.path.join(tmp_dir, 'github_step_summary')
+            # Pre-seed both files the way a real job would leave them
+            # before this step runs (empty, but present).
+            open(output_path, 'w', encoding='utf-8').close()
+            open(summary_path, 'w', encoding='utf-8').close()
+
+            env = dict(os.environ)
+            env['GITHUB_OUTPUT'] = output_path
+            env['GITHUB_STEP_SUMMARY'] = summary_path
+
+            with mock.patch.object(main_module, 'evaluate_blobs',
+                                   side_effect=RuntimeError('boom')):
+                with mock.patch.dict(os.environ, env, clear=True):
+                    exit_code, _stdout, _stderr = run_cli([
+                        '--base-ref', 'main', '--head-ref', 'feature',
+                        '--max-text-size-kb', '1000',
+                    ])
+
+            self.assertEqual(exit_code, 2)
+            with open(output_path, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), '')
+            with open(summary_path, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), '')
+
+
+class TestConfigErrorAnnotation(GitRepoTestBase):
+    """
+    A configuration error (the user's own mistake) is just as easy to miss
+    inside a collapsed step as an internal crash, so it also gets a
+    ::error:: annotation -- but it must never use the "bug"/issue-tracker
+    wording reserved for a genuine internal error.
+    """
+
+    def test_malformed_policy_emits_error_annotation_without_bug_wording(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+        self.helper.create_file('bad_policy.yml', 'not_a_real_key: [unterminated\n')
+
+        exit_code, stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'bad_policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn('::error::', stdout)
+        annotation_line = next(
+            line for line in stdout.splitlines() if line.startswith('::error::'))
+        self.assertIn('bad_policy.yml', annotation_line)
+        # Must not steer the user toward filing a bug report -- this is
+        # their configuration to fix, not ours.
+        self.assertNotIn('bug', annotation_line.lower())
+        self.assertNotIn('repo-size-guardian/issues', annotation_line)
+        self.assertNotIn('bug', stderr.lower())
+
+    def test_negative_threshold_emits_error_annotation_without_bug_wording(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-text-size-kb', '-5',
+        ])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn('::error::', stdout)
+        annotation_line = next(
+            line for line in stdout.splitlines() if line.startswith('::error::'))
+        self.assertIn('--max-text-size-kb', annotation_line)
+        self.assertNotIn('bug', annotation_line.lower())
+        self.assertNotIn('repo-size-guardian/issues', annotation_line)
 
 
 class TestMimeMatchingUnavailableWarning(GitRepoTestBase):

@@ -22,7 +22,7 @@ from .evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
 from .git_utils import get_diff_files_between, get_merge_base, list_commits
 from .load_branch import enumerate_changed_blobs
 from .models import Blob
-from .reporting import ReportConfig, ScanStats, report
+from .reporting import ReportConfig, ScanStats, emit_error_annotation, report
 from .rule_engine import Policy, PolicyError, load_policy
 from .size_resolver import augment_blob_objects_with_sizes
 from .type_detector import augment_blob_objects_with_types
@@ -401,8 +401,9 @@ def _is_shallow_repository() -> bool:
 
 
 _SHALLOW_CLONE_MESSAGE = """\
-repo-size-guardian requires full commit history to compute the merge-base \
-and walk the commits a PR introduces, but this checkout is a SHALLOW clone.
+this checkout is a SHALLOW clone, but repo-size-guardian requires full \
+commit history to compute the merge-base and walk the commits a PR \
+introduces.
 
 Fix: set `fetch-depth: 0` on your `actions/checkout` step, e.g.:
 
@@ -630,8 +631,10 @@ def run(args: argparse.Namespace) -> int:
     annotate_pr = _parse_bool(args.annotate_pr, '--annotate-pr')
 
     if _is_shallow_repository():
-        print(_SHALLOW_CLONE_MESSAGE, file=sys.stderr)
-        return EXIT_CONFIG_ERROR
+        # Raised (rather than printed here) so this shares the exact same
+        # stderr + `::error::` annotation treatment as every other
+        # configuration error, from a single place in main().
+        raise ConfigError(_SHALLOW_CLONE_MESSAGE)
 
     base_ref, head_ref = resolve_refs(args)
     merge_base = _merge_base_or_config_error(base_ref, head_ref)
@@ -670,6 +673,59 @@ def run(args: argparse.Namespace) -> int:
     return EXIT_VIOLATIONS if has_failing_violations(violations, args.fail_on) else EXIT_OK
 
 
+_ISSUE_TRACKER_URL = "https://github.com/technic960183/repo-size-guardian/issues"
+
+
+def _report_config_error(message: str) -> None:
+    """
+    Print a configuration/usage-error message to stderr and mirror it as a
+    GitHub ``::error::`` annotation on stdout.
+
+    Covers every exit-2 condition that is the *user's* configuration to
+    fix: `ConfigError` (a shallow clone, a bad/unresolvable ref, an
+    unrelated-history merge-base, an invalid input, ...), `PolicyError`, a
+    failed git command, and an invalid value. A misconfiguration is
+    currently just as easy to miss inside a (typically collapsed) step's
+    plain log as an internal crash, so it gets the same "make it impossible
+    to miss" annotation treatment as the internal-error handler in `main()`
+    (see `_internal_error_message`). Deliberately does NOT say "bug" or
+    point at the issue tracker, though: fixing one of these is on the
+    user, not on us.
+
+    Args:
+        message: The fully-formatted ``"repo-size-guardian: error: ..."``
+            message.
+    """
+    print(message, file=sys.stderr)
+    emit_error_annotation(message, stream=sys.stdout)
+
+
+def _internal_error_message(exc: BaseException) -> str:
+    """
+    Build the user-facing message for an unexpected internal crash.
+
+    Includes the installed package version and a direct link to the issue
+    tracker so a bug report arrives actionable, and is deliberately
+    explicit that this is a bug in repo-size-guardian itself -- not a
+    policy violation in the user's PR -- since exit code 2 is shared with
+    genuine configuration errors (see `_report_config_error`) that a reader
+    must not confuse this with.
+
+    Args:
+        exc: The exception that escaped `run()`.
+
+    Returns:
+        A single-paragraph message suitable for both stderr and a GitHub
+        ``::error::`` annotation.
+    """
+    return (
+        "repo-size-guardian v{0}: internal error ({1}: {2}). This is a BUG in "
+        "repo-size-guardian itself, not a policy violation in your PR -- see "
+        "the traceback above for details, and please report it (with that "
+        "traceback) at {3}".format(__version__, type(exc).__name__, exc, _ISSUE_TRACKER_URL)
+    )
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = _build_arg_parser()
@@ -678,34 +734,34 @@ def main() -> int:
     try:
         return run(args)
     except ConfigError as exc:
-        print(f"repo-size-guardian: error: {exc}", file=sys.stderr)
+        _report_config_error(f"repo-size-guardian: error: {exc}")
         return EXIT_CONFIG_ERROR
     except PolicyError as exc:
-        print(f"repo-size-guardian: error: {exc}", file=sys.stderr)
+        _report_config_error(f"repo-size-guardian: error: {exc}")
         return EXIT_CONFIG_ERROR
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr
         if isinstance(stderr, bytes):
             stderr = stderr.decode('utf-8', errors='replace')
         detail = (stderr or str(exc)).strip()
-        print(f"repo-size-guardian: error: git command failed: {detail}", file=sys.stderr)
+        _report_config_error(f"repo-size-guardian: error: git command failed: {detail}")
         return EXIT_CONFIG_ERROR
     except ValueError as exc:
-        print(f"repo-size-guardian: error: {exc}", file=sys.stderr)
+        _report_config_error(f"repo-size-guardian: error: {exc}")
         return EXIT_CONFIG_ERROR
-    except Exception:  # pylint: disable=broad-except
+    except Exception as exc:  # pylint: disable=broad-except
         # An unexpected crash must never be reported as exit code 1: that
         # is the "violations found" code, so a workflow (or a human) would
         # read an internal bug as "this PR has a policy violation". Print
         # the full traceback -- this is a bug report, not a user error --
-        # and exit with the configuration/usage code instead.
+        # and exit with the configuration/usage code instead. The message
+        # also goes out as a `::error::` annotation (not just a log line),
+        # since this is the one failure mode most worth surfacing loudly:
+        # an internal crash the user did nothing to cause.
         traceback.print_exc()
-        print(
-            "repo-size-guardian: internal error (see traceback above). This is a "
-            "bug in repo-size-guardian, not a policy violation; please report it "
-            "with the traceback.",
-            file=sys.stderr,
-        )
+        message = _internal_error_message(exc)
+        print(message, file=sys.stderr)
+        emit_error_annotation(message, stream=sys.stdout)
         return EXIT_CONFIG_ERROR
 
 

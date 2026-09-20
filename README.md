@@ -55,8 +55,9 @@ The action detects this itself and **fails fast with exit code 2** rather
 than silently scanning nothing:
 
 ```
+repo-size-guardian: error: this checkout is a SHALLOW clone, but
 repo-size-guardian requires full commit history to compute the merge-base
-and walk the commits a PR introduces, but this checkout is a SHALLOW clone.
+and walk the commits a PR introduces.
 
 Fix: set `fetch-depth: 0` on your `actions/checkout` step, e.g.:
 
@@ -233,21 +234,28 @@ or, to skip a whole directory from scanning entirely, add it to
 | `1` | One or more violations at or above `fail_on` were found. |
 | `2` | The scan did not complete. Two different situations share this code — see below for how to tell them apart. |
 
-Exit code `2` covers two distinct cases, and the printed message tells you
-which one you hit:
+Exit code `2` covers two distinct cases. Both also emit a GitHub `::error::`
+annotation (in addition to the plain log line), so either one surfaces in
+the Actions UI even if the step's log is collapsed — but the wording tells
+you which one you hit:
 
 - **Configuration/usage error** — a shallow clone, a malformed policy file,
   an unresolvable base/head ref (including running on a non-`pull_request`
   event, see [Limitations](#limitations)), or an invalid input value (e.g. a
   negative size threshold). Nothing was scanned. This is on your side: fix
-  the workflow, the policy file, or the inputs, and re-run.
+  the workflow, the policy file, or the inputs, and re-run. The message
+  looks like `repo-size-guardian: error: <what's wrong>` and never mentions
+  a "bug" or the issue tracker — there's nothing to report here.
 - **An internal error** — an unexpected crash inside repo-size-guardian
-  itself. The log shows a Python traceback followed by the line
-  `repo-size-guardian: internal error (see traceback above). This is a bug
-  in repo-size-guardian, not a policy violation`. If you see that message,
-  it is not a configuration problem to fix — please
+  itself. The log shows a Python traceback followed by a line like
+  `repo-size-guardian v1.0.0: internal error (RuntimeError: ...). This is a
+  BUG in repo-size-guardian itself, not a policy violation in your PR --
+  see the traceback above for details, and please report it (with that
+  traceback) at https://github.com/technic960183/repo-size-guardian/issues`.
+  The message always names the installed version and links straight to the
+  issue tracker, so if you see it, please
   [open an issue](https://github.com/technic960183/repo-size-guardian/issues)
-  with the traceback.
+  with the traceback and the version shown.
 
 ## Versioning
 

@@ -17,6 +17,7 @@ from repo_size_guardian.reporting import (
     ReportConfig,
     ScanStats,
     emit_annotations,
+    emit_error_annotation,
     format_console_report,
     format_step_summary,
     remediation_hint,
@@ -359,6 +360,30 @@ class TestEmitAnnotations(unittest.TestCase):
         stream = io.StringIO()
         emit_annotations([v], ReportConfig(), stream=stream)
         self.assertNotIn('line=', stream.getvalue())
+
+
+class TestEmitErrorAnnotation(unittest.TestCase):
+    """
+    Tests for emit_error_annotation: the ad-hoc ::error:: annotation used
+    outside the per-violation path (config errors, internal crashes).
+    """
+
+    def test_writes_a_plain_error_annotation(self):
+        stream = io.StringIO()
+        emit_error_annotation('something went wrong', stream=stream)
+        self.assertEqual(stream.getvalue(), '::error::something went wrong\n')
+
+    def test_no_file_property(self):
+        # Unlike emit_annotations, this is not attached to any one file.
+        stream = io.StringIO()
+        emit_error_annotation('oops', stream=stream)
+        self.assertNotIn('file=', stream.getvalue())
+
+    def test_reuses_the_same_message_escaping_as_emit_annotations(self):
+        stream = io.StringIO()
+        emit_error_annotation('100% done\nline2\rline3', stream=stream)
+        output = stream.getvalue()
+        self.assertEqual(output, '::error::100%25 done%0Aline2%0Dline3\n')
 
 
 class TestWriteGithubOutput(unittest.TestCase):
