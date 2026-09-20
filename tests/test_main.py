@@ -365,5 +365,213 @@ class TestBooleanParsing(unittest.TestCase):
             main_module._parse_bool('nope', '--dedupe-blobs')
 
 
+class TestDiffModeUsesMergeBase(GitRepoTestBase):
+    """
+    diff mode must diff MERGE-BASE..head, not base-tip..head.
+
+    A two-tree diff of the base branch tip against the PR head also reports
+    every file the base branch changed after the PR branched: those files
+    differ between the two trees even though the PR never touched them, and
+    the PR-side (older) blob would be attributed to the PR. That is a false
+    positive that blocks somebody's PR over a file they did not write --
+    the most expensive possible failure mode for this tool. GitHub's own
+    "Files changed" view uses the three-dot/merge-base diff for the same
+    reason.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Base commit carries a large binary.
+        self.helper.create_and_commit_file(
+            'data.bin', b'\x00' * (300 * 1024), 'Base commit with big data.bin')
+        self.helper.create_branch('feature')
+        # The PR touches only notes.txt.
+        self.helper.commit_file('notes.txt', 'just some notes', 'PR adds notes')
+        # Meanwhile the base branch moves on and shrinks data.bin.
+        self.helper.checkout('main')
+        self.helper.create_and_commit_file('data.bin', b'\x00', 'Base shrinks data.bin')
+        self.helper.checkout('feature')
+
+    def test_diff_mode_does_not_report_a_file_only_base_changed(self):
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--max-binary-size-kb', '100',
+        ])
+        self.assertNotIn('data.bin', stdout)
+        self.assertEqual(exit_code, 0)
+
+    def test_diff_mode_does_not_report_a_file_only_added_on_base(self):
+        self.helper.checkout('main')
+        self.helper.create_and_commit_file(
+            'base_only.bin', b'\x01' * (400 * 1024), 'Base adds another big file')
+        self.helper.checkout('feature')
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--max-binary-size-kb', '100',
+        ])
+        self.assertNotIn('base_only.bin', stdout)
+        self.assertEqual(exit_code, 0)
+
+    def test_diff_mode_still_reports_a_file_the_pr_added(self):
+        # Guard against over-correcting the fix into a false negative.
+        self.helper.create_and_commit_file(
+            'pr_added.bin', b'\x02' * (500 * 1024), 'PR adds a big file')
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--max-binary-size-kb', '100',
+        ])
+        self.assertEqual(exit_code, 1)
+        self.assertIn('pr_added.bin', stdout)
+
+    def test_history_mode_is_unaffected_by_an_advanced_base(self):
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'history', '--max-binary-size-kb', '100',
+        ])
+        self.assertNotIn('data.bin', stdout)
+        self.assertEqual(exit_code, 0)
+
+
+class TestCommitsScannedCount(GitRepoTestBase):
+    """
+    "Commits scanned" is the user's main sanity check that the action looked
+    at the range they expected, so it must count the commits in the range,
+    not just the ones that happened to touch a file.
+    """
+
+    def test_counts_commits_with_no_file_changes(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('a.txt', 'a', 'Commit 1')
+        self.helper.run_git('commit', '--allow-empty', '-m', 'Empty commit')
+        self.helper.commit_file('b.txt', 'b', 'Commit 3')
+
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-text-size-kb', '1000',
+        ])
+        self.assertIn('Commits scanned: 3', stdout)
+
+    def test_diff_mode_reports_the_real_commit_count(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('a.txt', 'a', 'Commit 1')
+        self.helper.commit_file('b.txt', 'b', 'Commit 2')
+
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--max-text-size-kb', '1000',
+        ])
+        self.assertIn('Commits scanned: 2', stdout)
+
+
+class TestReportOrdering(GitRepoTestBase):
+    """
+    Blobs are fed oldest-commit-first for dedupe, but the files *within* one
+    commit must keep their natural (git diff, path-sorted) order rather than
+    being reversed along with the commits.
+    """
+
+    def test_files_within_a_commit_keep_their_order(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.create_file('a.txt', 'X' * 2000)
+        self.helper.create_file('b.txt', 'X' * 3000)
+        self.helper.run_git('add', 'a.txt', 'b.txt')
+        self.helper.run_git('commit', '-m', 'Add both in one commit')
+        self.helper.commit_file('c.txt', 'X' * 4000, 'Add c later')
+
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-text-size-kb', '1',
+        ])
+        order = [line.split()[2] for line in stdout.splitlines()
+                 if line.strip().startswith(('ERROR', 'WARN'))]
+        self.assertEqual(order, ['a.txt', 'b.txt', 'c.txt'])
+
+
+class TestNoMergeBase(GitRepoTestBase):
+    """Unrelated histories produce a config error with an actionable message."""
+
+    def test_unrelated_histories_exit_two_with_clear_message(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_orphan_branch('unrelated')
+        self.helper.commit_file('other.txt', 'other', 'Unrelated root commit')
+
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'unrelated',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('merge base', stderr.lower())
+        self.assertIn('fetch-depth: 0', stderr)
+
+
+class TestNumericInputValidation(GitRepoTestBase):
+    """Negative numeric inputs are typos, and must not degrade silently."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+    def test_negative_max_annotations_is_a_config_error(self):
+        # `0 means unlimited` is implemented as `limit > 0`, so a negative
+        # value would silently also mean unlimited.
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-annotations', '-1',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('--max-annotations', stderr)
+
+    def test_negative_size_threshold_is_a_config_error(self):
+        # A negative threshold would make every single file a violation.
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-text-size-kb', '-5',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('--max-text-size-kb', stderr)
+
+    def test_zero_max_annotations_is_accepted_as_unlimited(self):
+        exit_code, _stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-annotations', '0', '--max-text-size-kb', '1000',
+        ])
+        self.assertEqual(exit_code, 0)
+
+    def test_non_integer_max_annotations_exits_two(self):
+        with self.assertRaises(SystemExit) as caught:
+            run_cli(['--base-ref', 'main', '--head-ref', 'feature',
+                     '--max-annotations', 'lots'])
+        self.assertEqual(caught.exception.code, 2)
+
+
+class TestUnexpectedExceptionExitCode(GitRepoTestBase):
+    """
+    An internal crash must not be reported as exit code 1.
+
+    Exit 1 means "violations found", so an uncaught exception escaping
+    main() would make a workflow -- and a human reading the log -- treat a
+    bug in this tool as a policy violation in the PR.
+    """
+
+    def test_internal_error_exits_two_not_one(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        with mock.patch.object(main_module, 'evaluate_blobs',
+                               side_effect=RuntimeError('boom')):
+            exit_code, _stdout, stderr = run_cli([
+                '--base-ref', 'main', '--head-ref', 'feature',
+                '--max-text-size-kb', '1000',
+            ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('internal error', stderr)
+        self.assertIn('RuntimeError', stderr)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -13,22 +13,18 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__
 from .evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
-from .git_utils import get_merge_base
+from .git_utils import get_diff_files_between, get_merge_base, list_commits
 from .load_branch import enumerate_changed_blobs
 from .models import Blob
 from .reporting import ReportConfig, ScanStats, report
 from .rule_engine import Policy, PolicyError, load_policy
 from .size_resolver import augment_blob_objects_with_sizes
 from .type_detector import augment_blob_objects_with_types
-
-#: Tree entry mode of a gitlink (submodule) entry -- see git_utils._GITLINK_MODE.
-#: Duplicated here (rather than imported) because it is an implementation
-#: detail of raw diff parsing, needed locally for `_enumerate_diff_blobs`.
-_GITLINK_MODE = '160000'
 
 #: Accepted spellings for CLI/action boolean inputs, which arrive as strings
 #: from the composite action (e.g. "true"/"false"), not real booleans.
@@ -266,6 +262,78 @@ def _resolve_sha(ref: str) -> str:
     return result.stdout.strip()
 
 
+def _merge_base_or_config_error(base_ref: str, head_ref: str) -> str:
+    """
+    Compute the merge-base of two refs, or raise an actionable ConfigError.
+
+    `git merge-base` exits non-zero with *no output at all* when the two
+    commits share no common ancestor (unrelated histories, or a base
+    branch that was force-pushed so its old tip is no longer reachable).
+    Letting that surface as a bare `CalledProcessError` would print
+    "git command failed: Command '[...]' returned non-zero exit status 1",
+    which tells the user nothing about what to do.
+
+    Args:
+        base_ref: Base ref (older side).
+        head_ref: Head ref (newer side).
+
+    Returns:
+        The merge-base commit SHA.
+
+    Raises:
+        ConfigError: If the two refs have no merge base, or if either ref
+            cannot be resolved.
+    """
+    try:
+        merge_base = get_merge_base(base_ref, head_ref)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr
+        if isinstance(stderr, bytes):  # pragma: no cover - get_merge_base uses text=True
+            stderr = stderr.decode('utf-8', errors='replace')
+        detail = (stderr or '').strip()
+        raise ConfigError(
+            f"Could not compute a merge base between base ref {base_ref!r} and "
+            f"head ref {head_ref!r}"
+            + (f": {detail}" if detail else " (they share no common ancestor)")
+            + ". Check that both refs exist in this checkout and that "
+            "`actions/checkout` ran with `fetch-depth: 0`; if the base "
+            "branch was force-pushed, re-run the workflow or pass "
+            "--base-ref/base_ref explicitly."
+        ) from exc
+    if not merge_base:
+        raise ConfigError(
+            f"git merge-base returned nothing for base ref {base_ref!r} and "
+            f"head ref {head_ref!r}; they appear to share no common ancestor."
+        )
+    return merge_base
+
+
+def _validate_numeric_args(args: argparse.Namespace) -> None:
+    """
+    Reject negative numeric inputs, which would otherwise degrade silently.
+
+    A negative `--max-annotations` would be read as "unlimited" (the
+    0-means-unlimited check is `limit > 0`), and a negative size threshold
+    would make every single file a violation. Both are typos, and both are
+    far better reported as a configuration error than acted on.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Raises:
+        ConfigError: If any numeric input is negative.
+    """
+    if args.max_annotations < 0:
+        raise ConfigError(
+            f"--max-annotations must be >= 0 (0 means unlimited), got "
+            f"{args.max_annotations}"
+        )
+    for name, value in (('--max-text-size-kb', args.max_text_size_kb),
+                        ('--max-binary-size-kb', args.max_binary_size_kb)):
+        if value is not None and value < 0:
+            raise ConfigError(f"{name} must be >= 0, got {value:g}")
+
+
 # ---------------------------------------------------------------------------
 # Shallow-clone preflight
 # ---------------------------------------------------------------------------
@@ -312,22 +380,28 @@ this would make history scanning silently look at little or nothing.\
 
 # ---------------------------------------------------------------------------
 # Diff-mode blob enumeration (a single merge-base..head diff, rather than a
-# per-commit history walk). `git_utils.get_diff_files` only diffs a single
-# commit against its parent, so it cannot express this directly; this
-# mirrors its raw-diff parsing for two explicit refs instead.
+# per-commit history walk).
 # ---------------------------------------------------------------------------
 
-def _enumerate_diff_blobs(base_ref: str, head_ref: str, head_sha: str) -> List[Dict[str, str]]:
+def _enumerate_diff_blobs(merge_base: str, head_ref: str, head_sha: str) -> List[Dict[str, str]]:
     """
-    Enumerate the net changed blobs between `base_ref` and `head_ref`.
+    Enumerate the net changed blobs between `merge_base` and `head_ref`.
 
     Used for `scan_mode='diff'`: a single diff pass over the whole range,
-    rather than one diff per commit. Every yielded entry is stamped with
-    `head_sha` as its `commit_sha`, per contract (there is no single
-    "introducing" commit for a net diff).
+    rather than one diff per commit. Every entry is stamped with `head_sha`
+    as its `commit_sha`, per contract (there is no single "introducing"
+    commit for a net diff).
+
+    The older side must be the **merge-base**, not the base branch tip: a
+    tip-to-head two-tree diff also reports every file the base branch
+    changed after the PR branched (they differ between the two trees even
+    though the PR never touched them), which would block a PR over
+    somebody else's file. This mirrors the three-dot diff GitHub's own
+    "Files changed" view uses, and keeps diff mode consistent with history
+    mode, which already walks `merge-base..head`.
 
     Args:
-        base_ref: The diff's base (older side).
+        merge_base: The diff's base (older side); the merge-base commit.
         head_ref: The diff's head (newer side).
         head_sha: Full commit SHA to record as `commit_sha` on every entry.
 
@@ -340,43 +414,12 @@ def _enumerate_diff_blobs(base_ref: str, head_ref: str, head_sha: str) -> List[D
         ValueError: If the diff output is not in the expected raw format
             (e.g. a rename/copy record, which is not requested here).
     """
-    result = subprocess.run(
-        ['git', 'diff-tree', '--no-commit-id', '--raw', '--no-abbrev', '-r', '-z',
-         base_ref, head_ref],
-        capture_output=True,
-        check=True,
-    )
-    out = result.stdout
-
-    fields = [os.fsdecode(field) for field in out.split(b'\0')]
-    if fields and fields[-1] == '':
-        fields.pop()
-
     entries: List[Dict[str, str]] = []
-    records = iter(fields)
-    for meta in records:
-        if not meta.startswith(':'):
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        meta_fields = meta[1:].split(' ')
-        if len(meta_fields) != 5:
-            raise ValueError(f"Unexpected diff output format: {meta}")
-        _old_mode, new_mode, _old_sha, new_sha, status = meta_fields
-
-        path = next(records, None)
-        if path is None:
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        if status.startswith(('R', 'C')):
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        if new_mode == _GITLINK_MODE:
-            continue
-
-        blob_sha = '' if status.startswith('D') else new_sha
+    for change in get_diff_files_between(merge_base, head_ref):
+        status = change['status']
         entries.append({
-            'path': path,
-            'blob_sha': blob_sha,
+            'path': change['path'],
+            'blob_sha': '' if status.startswith('D') else change['blob_sha'],
             'commit_sha': head_sha,
             'status': status,
         })
@@ -432,8 +475,35 @@ def _warn_if_nothing_enforced(policy: Policy, was_found: bool, policy_path: str,
 # Pipeline
 # ---------------------------------------------------------------------------
 
-def _collect_blobs(scan_mode: str, merge_base: str, base_ref: str,
-                    head_ref: str, head_sha: str) -> Tuple[List[Blob], int]:
+def _reverse_commit_order(entries: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """
+    Reorder change records oldest-commit-first, keeping each commit's own
+    file order intact.
+
+    `enumerate_changed_blobs` emits records grouped by commit, newest
+    commit first. A flat `list.reverse()` would put the oldest commit
+    first but would also reverse the file order *within* every commit,
+    which needlessly scrambles the report. This reverses only the groups.
+
+    Args:
+        entries: Change records grouped by commit, newest commit first.
+
+    Returns:
+        The same records, oldest commit first, intra-commit order preserved.
+    """
+    groups: List[List[Dict[str, str]]] = []
+    current_sha = None
+    for entry in entries:
+        if not groups or entry['commit_sha'] != current_sha:
+            current_sha = entry['commit_sha']
+            groups.append([])
+        groups[-1].append(entry)
+    groups.reverse()
+    return [entry for group in groups for entry in group]
+
+
+def _collect_blobs(scan_mode: str, merge_base: str, head_ref: str,
+                    head_sha: str) -> Tuple[List[Blob], int]:
     """
     Enumerate and build `Blob` objects for the configured scan mode.
 
@@ -447,10 +517,18 @@ def _collect_blobs(scan_mode: str, merge_base: str, base_ref: str,
     For `diff`, a single net diff `merge_base..head_ref` is taken instead;
     there is only one pass, so no reordering is needed.
 
+    `commits_scanned` is the number of commits in `merge_base..head_ref` in
+    both modes. It is counted from `git rev-list` rather than from the
+    distinct commit SHAs actually seen in the change records, so that
+    commits introducing no blob change (empty commits, submodule-only
+    commits, conflict-free merges) still count: this number is the user's
+    main sanity check that the action scanned the range they expected, so
+    under-reporting it would hide a mis-scoped scan.
+
     Args:
         scan_mode: 'history' or 'diff'.
-        merge_base: Merge-base commit SHA.
-        base_ref: Resolved base ref (used for the diff-mode git call).
+        merge_base: Merge-base commit SHA; the older side of both the
+            history range and the net diff.
         head_ref: Resolved head ref (used for the diff-mode git call and the
             history commit range).
         head_sha: Full head commit SHA (stamped as `commit_sha` in diff mode).
@@ -459,16 +537,12 @@ def _collect_blobs(scan_mode: str, merge_base: str, base_ref: str,
         A `(blobs, commits_scanned)` tuple.
     """
     commit_range = f'{merge_base}..{head_ref}'
+    commits_scanned = len(list_commits(commit_range))
 
     if scan_mode == 'diff':
-        raw_entries = _enumerate_diff_blobs(base_ref, head_ref, head_sha)
-        commits_scanned = 1
+        raw_entries = _enumerate_diff_blobs(merge_base, head_ref, head_sha)
     else:
-        # enumerate_changed_blobs walks commits newest-first; reverse so
-        # blobs are fed oldest-commit-first (see docstring above).
-        raw_entries = list(enumerate_changed_blobs(commit_range))
-        raw_entries.reverse()
-        commits_scanned = len({entry['commit_sha'] for entry in raw_entries})
+        raw_entries = _reverse_commit_order(list(enumerate_changed_blobs(commit_range)))
 
     blobs = [Blob.from_dict(entry) for entry in raw_entries]
     return blobs, commits_scanned
@@ -484,19 +558,20 @@ def run(args: argparse.Namespace) -> int:
     Returns:
         The process exit code (0 clean, 1 violations, 2 configuration error).
     """
+    _validate_numeric_args(args)
+    dedupe_blobs = _parse_bool(args.dedupe_blobs, '--dedupe-blobs')
+    annotate_pr = _parse_bool(args.annotate_pr, '--annotate-pr')
+
     if _is_shallow_repository():
         print(_SHALLOW_CLONE_MESSAGE, file=sys.stderr)
         return EXIT_CONFIG_ERROR
 
-    dedupe_blobs = _parse_bool(args.dedupe_blobs, '--dedupe-blobs')
-    annotate_pr = _parse_bool(args.annotate_pr, '--annotate-pr')
-
     base_ref, head_ref = resolve_refs(args)
-    merge_base = get_merge_base(base_ref, head_ref)
+    merge_base = _merge_base_or_config_error(base_ref, head_ref)
     head_sha = _resolve_sha(head_ref)
 
     blobs, commits_scanned = _collect_blobs(
-        args.scan_mode, merge_base, base_ref, head_ref, head_sha)
+        args.scan_mode, merge_base, head_ref, head_sha)
 
     augment_blob_objects_with_sizes(blobs)
     augment_blob_objects_with_types(blobs)
@@ -549,6 +624,20 @@ def main() -> int:
         return EXIT_CONFIG_ERROR
     except ValueError as exc:
         print(f"repo-size-guardian: error: {exc}", file=sys.stderr)
+        return EXIT_CONFIG_ERROR
+    except Exception:  # pylint: disable=broad-except
+        # An unexpected crash must never be reported as exit code 1: that
+        # is the "violations found" code, so a workflow (or a human) would
+        # read an internal bug as "this PR has a policy violation". Print
+        # the full traceback -- this is a bug report, not a user error --
+        # and exit with the configuration/usage code instead.
+        traceback.print_exc()
+        print(
+            "repo-size-guardian: internal error (see traceback above). This is a "
+            "bug in repo-size-guardian, not a policy violation; please report it "
+            "with the traceback.",
+            file=sys.stderr,
+        )
         return EXIT_CONFIG_ERROR
 
 
