@@ -10,7 +10,11 @@ See [docs/development.md](docs/development.md) for cloning the repo,
 installing it in editable mode, and running the test suite
 (`python -m unittest discover tests -v` — this project uses only the
 Python standard library's `unittest`; `pytest` is not used and is not a
-dependency).
+dependency). That doc's
+["Dry-running a real scan locally"](docs/development.md#dry-running-a-real-scan-locally)
+section is worth a look before you dig into a change — it's a
+copy-pasteable way to run an actual scan (not just `--version`) and see
+all four of the action's output surfaces without needing a GitHub runner.
 
 A few things worth knowing before you dig in:
 
