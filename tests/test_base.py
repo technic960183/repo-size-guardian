@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 
 class GitRepoTestHelper:
@@ -140,6 +141,26 @@ class GitRepoTestBase(unittest.TestCase):
         self.helper = GitRepoTestHelper(self.test_dir)
         os.chdir(self.test_dir)
         self.helper.init_repo()
+
+        # Most of these tests drive main.py's CLI end to end, which
+        # constructs a real ReportConfig() with no explicit paths -- its
+        # defaults read GITHUB_STEP_SUMMARY/GITHUB_OUTPUT straight from the
+        # environment. On a real GitHub Actions runner (including the one
+        # running this very test suite in CI) both are always set, so an
+        # un-isolated test that completes a scan would append a real
+        # "Repo Size Guardian" table to the run's own job summary and a
+        # real violations_found=/summary= line to the step's own output --
+        # stray, misleading noise on a public repo's Actions run. Popping
+        # them here (restored verbatim by mock.patch.dict on teardown, via
+        # addCleanup, whatever they were -- set, unset, or changed mid-test)
+        # makes every such test behave like a local run with no GitHub
+        # environment, which is what these tests actually mean to exercise
+        # unless they opt in with their own explicit temp-file paths.
+        env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+        os.environ.pop('GITHUB_STEP_SUMMARY', None)
+        os.environ.pop('GITHUB_OUTPUT', None)
 
     def tearDown(self):
         """Clean up test environment."""
