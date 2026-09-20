@@ -16,6 +16,7 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_packages(),
     python_requires=">=3.8",
+    install_requires=["PyYAML>=5.1"],
     entry_points={
         "console_scripts": [
             "repo-size-guardian=repo_size_guardian.main:main",
