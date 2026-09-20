@@ -1,0 +1,23 @@
+# Fixture policy for the CI self-test's "YAML policy path" case
+# (.github/workflows/ci.yml, self-test job).
+#
+# Exercises three policy features together in one real scan, end to end,
+# in the actual GitHub Actions runner: `ignore.globs`, `disallow.extensions`,
+# and a per-rule `size_over_kb` threshold. This is also what proves PyYAML
+# actually installs and parses correctly as a runtime dependency -- the
+# unit tests import PyYAML directly, but never through a fresh `pip install`
+# of the packaged action the way a real consumer would.
+ignore:
+  globs:
+    - "vendor/**"
+
+disallow:
+  extensions: ["exe"]
+
+rules:
+  - id: big-log
+    description: "Block log files over 50KB"
+    match:
+      extensions: ["log"]
+    size_over_kb: 50
+    action: error

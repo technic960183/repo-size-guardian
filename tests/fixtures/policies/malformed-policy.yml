@@ -1,0 +1,11 @@
+# Fixture policy for the CI self-test's "malformed policy" case
+# (.github/workflows/ci.yml, self-test job).
+#
+# Deliberately invalid YAML (an unclosed flow sequence): must make
+# `repo_size_guardian.rule_engine.load_policy` raise `PolicyError`, which
+# `main.py` maps to exit code 2 (EXIT_CONFIG_ERROR) -- distinct from exit
+# code 1 (violations found). Do not "fix" this file; the point is that it
+# fails to parse.
+disallow:
+  extensions: [exe
+    this is not valid yaml: [

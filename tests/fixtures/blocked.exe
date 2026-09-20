@@ -1,0 +1,3 @@
+Not a real executable -- just a tiny probe file for the CI self-test's
+"disallow.extensions" case (.github/workflows/ci.yml, self-test job). Its
+`.exe` extension is what matters, not its content or size.
