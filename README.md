@@ -187,7 +187,16 @@ real PRs, and only start enforcing once the policy actually fits the repo.
 
 Start with the job log, the PR's annotations, or the job summary — each
 violation names the file, its size, and which rule or threshold it hit.
-Then:
+
+**If you don't see an annotation on the "Files changed" tab, check the job
+summary instead.** GitHub only attaches an annotation to that tab when the
+annotated file is part of the diff GitHub itself computed for the PR. In
+the default `history` scan mode, a very common violation is a file that
+was added in one commit and deleted again in a later commit within the
+same PR — exactly the kind of file that nets out to no change and so
+never appears on "Files changed". Those annotations still show up on the
+PR's **Checks** tab and in the job log, but the job summary is the one
+place guaranteed to list every violation regardless of this. Then:
 
 **Why deleting the file in a later commit usually does NOT fix it.** In the
 default `history` scan mode, the offending blob is already part of a commit
@@ -299,6 +308,12 @@ you which one you hit:
   not remove files or rewrite history for you.
 - **No SARIF or JSON output.** Results are available as console log lines,
   GitHub PR annotations, and a Markdown job summary only.
+- **First-time contributors need a maintainer's approval before the check
+  even runs.** On an outside contributor's first pull request to your repo,
+  GitHub requires a maintainer to click "Approve and run workflows" before
+  any workflow — including this one — executes at all, so the size check
+  simply won't appear until that happens. This is a GitHub Actions security
+  feature that applies to every action, not a sign that this one is broken.
 
 ## Documentation
 
