@@ -227,8 +227,13 @@ that commit's tree forever. If your repository **squash-merges** PRs into the
 default branch, the PR's intermediate commits are discarded at merge time and
 never enter the default branch's history at all — so `history` mode can flag
 a blob that would never actually have been permanently stored. Use `diff`
-mode there instead: it compares only the base and head trees directly, which
-matches what squash-merge will actually commit.
+mode there instead: it diffs the **merge-base** (where the PR branched off)
+against head — not the current base branch tip against head — which is the
+same net change GitHub's own three-dot "Files changed" view shows, and what
+squash-merge will actually commit as long as the base hasn't moved further
+by merge time. Diffing from the merge-base rather than the base tip also
+means a file the base branch changed on its own, after the PR branched, is
+never attributed to the PR.
 
 ```yaml
 # scan_mode: history (default) — for repos using merge commits or rebase

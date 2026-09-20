@@ -293,6 +293,28 @@ path's basename (directories are stripped first).
 - A blob whose MIME type couldn't be detected (`None`) never matches
   anything, including a `/*` wildcard.
 
+### ⚠️ MIME matching requires the `file` command
+
+A MIME type is only ever produced by running the `file --mime` command on
+the blob's content. If `file` is not installed on the runner, MIME
+detection falls back to a content heuristic that never reports a MIME type
+at all — so every blob's MIME type is `None`, and per the rule above,
+`None` never matches anything. **In that situation, `disallow.mime_types`
+and every `match.mime_types` rule silently match nothing, and a policy that
+looks like it's enforcing MIME-based rules is actually enforcing none of
+them.** The scan still exits `0` on a "clean" PR — there is no way to
+distinguish that from a genuinely clean PR by exit code alone.
+
+GitHub-hosted runners (`ubuntu-latest`, etc.) have `file` preinstalled, so
+this mostly affects self-hosted and minimal container runners.
+repo-size-guardian detects this itself: if the loaded policy uses
+`mime_types` anywhere and `file` is not on `PATH`, it prints an
+`::warning::` naming the problem. That warning is easy to miss in a long
+job log, though, so if you rely on `mime_types` matching, either confirm
+`file` is present on your runner (`apt-get install -y file` on Debian/
+Ubuntu-based images), or prefer `extensions`/`globs` matching, which has no
+such dependency.
+
 ## Rule match combination
 
 Within a single rule's `match` block:
