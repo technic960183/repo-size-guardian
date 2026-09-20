@@ -12,27 +12,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.8/3.11 is the range setup.py's `python_requires`/classifiers
-        # actually declare. '3.x' is a *third*, separate leg: action.yml's
-        # own "Setup Python" step pins `python-version: '3.x'` (always
-        # whatever is newest), so the package's real production runtime is
-        # NOT bounded by the 3.8-3.11 range below -- it silently tracks
-        # whatever '3.x' resolves to on the day a consumer's workflow runs.
-        # This leg exists to catch a forward-compatibility break on that
-        # actual runtime before a consumer does.
+        # '3.11' is the top of the range setup.py's `python_requires`/
+        # classifiers declare, and the only leg that collects coverage.
         #
-        # 3.8 itself reached end-of-life 2024-10-07. No Python 3.8
-        # interpreter was available in the environment this workflow was
-        # authored in, so 3.8 support could only be checked by syntax
-        # (py_compile/ast under Python 3.6, a stricter grammar subset --
-        # no 3.9+-only syntax was found anywhere in repo_size_guardian/),
-        # NOT by actually running the test suite under 3.8. GitHub-hosted
-        # `ubuntu-latest` runners have also been dropping prebuilt EOL
-        # interpreters over time; `actions/setup-python` may need to build
-        # 3.8 from source on a newer Ubuntu image, which can be slow or can
-        # fail outright. If this leg ever fails to even set up Python, that
-        # is new information about whether 3.8 support is still real --
-        # investigate before assuming it's just flakiness.
+        # '3.x' is a *second*, separate leg: action.yml's own "Setup Python"
+        # step pins `python-version: '3.x'` (always whatever is newest), so
+        # the package's real production runtime is NOT bounded by the
+        # declared 3.8-3.11 range -- it silently tracks whatever '3.x'
+        # resolves to on the day a consumer's workflow runs. This leg exists
+        # to catch a forward-compatibility break on that actual runtime
+        # before a consumer does.
+        #
+        # '3.8' is a deliberately supported target (setup.py's
+        # python_requires floor) and is confirmed to provision fine on
+        # ubuntu-latest. Do not re-investigate its EOL status or runner
+        # availability, and do not propose dropping it.
         python-version: ['3.8', '3.11', '3.x']
 
     steps:
@@ -86,10 +80,11 @@ jobs:
       run: |
         python -m repo_size_guardian --version
 
-  # End-to-end self-test: actually runs the packaged action, via `uses: ./`,
-  # against synthetic PRs with known, deliberately-crafted violations, and
-  # asserts on its real exit code and its real `outputs.*` -- not just that
-  # it ran without crashing (the previous placeholder's only check).
+  # End-to-end self-test: actually runs the packaged action, via
+  # `uses: ./.rsg-action`, against synthetic PRs with known, deliberately-
+  # crafted violations, and asserts on its real exit code and its real
+  # `outputs.*` -- not just that it ran without crashing (the previous
+  # placeholder's only check).
   #
   # Nothing in this project has ever executed inside a real GitHub Actions
   # runner before this job exists. The single most important thing it
@@ -99,23 +94,41 @@ jobs:
     needs: test
     if: github.event_name == 'pull_request'
 
+    env:
+      # Where the action's own source is parked so that building the fixture
+      # history in $GITHUB_WORKSPACE cannot destroy it. Must stay in sync
+      # with the `uses: ./.rsg-action` references below, which cannot use an
+      # expression (`uses:` is not evaluated against `env`).
+      ACTION_DIR: .rsg-action
+
     steps:
     - name: Check out repo-size-guardian
       uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
-    # The next step turns this checkout into a set of synthetic, disposable
-    # git branches (see "Build synthetic fixture git history" below), which
-    # wipes the working tree with `git clean -fdx`. The only fixture inputs
-    # that need to survive that wipe -- a handful of tiny policy YAMLs and
-    # probe files, see tests/fixtures/ -- are copied out to $RUNNER_TEMP
-    # first.
-    - name: Stage tiny fixture inputs outside the working tree
+    # "Build synthetic fixture git history" below turns this very checkout
+    # into a set of synthetic, disposable git branches, and its
+    # `git clean -fdx` deletes EVERY file in $GITHUB_WORKSPACE -- including
+    # `action.yml` and `repo_size_guardian/` themselves. So two things are
+    # copied out of the working tree first:
+    #
+    #   1. the handful of tiny policy YAMLs and probe files the fixtures are
+    #      built from (tests/fixtures/), and
+    #   2. the action's own source, as a tar of the tree at HEAD.
+    #
+    # (2) is what the first run of this job got wrong: it ran `uses: ./`
+    # against a workspace whose `action.yml` the fixture builder had just
+    # deleted, and every scenario died with "Can't find 'action.yml' ...
+    # under '/home/runner/work/...'". `git archive HEAD` rather than a `cp`
+    # is deliberate -- it captures exactly the tracked tree a consumer of
+    # this action would get, and nothing else.
+    - name: Stage the action source and fixture inputs outside the working tree
       run: |
         set -euo pipefail
         mkdir -p "${RUNNER_TEMP}/fixtures"
         cp -r tests/fixtures/. "${RUNNER_TEMP}/fixtures/"
+        git archive --format=tar -o "${RUNNER_TEMP}/action-src.tar" HEAD
 
     # Every scenario below is a real, disconnected commit history built
     # entirely on this disposable runner, on branches that are never pushed
@@ -209,13 +222,72 @@ jobs:
         git add .github/repo-size-guardian.yml placeholder.txt
         git commit -q -m "fixture: malformed policy file"
 
+    # Unpacked only now, AFTER the `git clean -fdx` above, so the wipe can
+    # never reach it. It stays untracked on every fixture branch, which is
+    # harmless: the scan walks commits in the `fixture/base..fixture/*`
+    # range, never the working tree, and `git checkout` between branches
+    # does not touch untracked paths. (Verified locally by replaying this
+    # whole sequence in a throwaway clone.)
+    #
+    # A second `actions/checkout` with `path:` would also work, but it would
+    # land inside the same workspace and so has to be sequenced just as
+    # carefully -- for one extra network round-trip and a second copy of the
+    # git history.
+    - name: Restore the action's own source where the fixture wipe cannot reach it
+      run: |
+        set -euo pipefail
+        mkdir -p "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+        tar -xf "${RUNNER_TEMP}/action-src.tar" -C "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+        # Fail here, with a comprehensible message, rather than several
+        # steps later inside the runner's local-action resolver.
+        test -f "${GITHUB_WORKSPACE}/${ACTION_DIR}/action.yml"
+        test -f "${GITHUB_WORKSPACE}/${ACTION_DIR}/setup.py"
+
+    # The scenarios below assert two different things, and they need two
+    # different mechanisms:
+    #
+    #   * exit code + `steps.<id>.outputs.*` -- only observable through a
+    #     real `uses:` step, so those assertions go through the action.
+    #   * which paths the Markdown job summary actually names -- NOT
+    #     observable from a later step. `$GITHUB_STEP_SUMMARY` is a fresh,
+    #     empty file for every step (GitHub: "GITHUB_STEP_SUMMARY is unique
+    #     for each step in a job"); the runner harvests each step's file
+    #     when that step ends and only collates them on the run summary
+    #     page. The first version of this job grepped
+    #     `$GITHUB_STEP_SUMMARY` from the step AFTER the action ran, which
+    #     could only ever have grepped an empty file.
+    #
+    # So the job-summary content is asserted by invoking the CLI directly
+    # inside a single step and grepping that step's OWN summary file, in the
+    # same step, before the runner takes it away. That needs the package
+    # importable outside the composite action, hence the explicit setup +
+    # install here. '3.x' matches the interpreter action.yml itself pins, so
+    # the composite action's own "Setup Python" is a cache hit rather than a
+    # second, different runtime.
+    - name: Set up Python for the direct-CLI assertions
+      uses: actions/setup-python@v6
+      with:
+        python-version: '3.x'
+
+    - name: Install the packaged action for the direct-CLI assertions
+      run: |
+        set -euo pipefail
+        python -m pip install --quiet --disable-pip-version-check \
+          --retries 5 --timeout 30 "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+
     # --- Scenario 1: clean scan -------------------------------------------
     - name: "Scenario 1: check out the clean fixture"
       run: git checkout fixture/clean
 
+    # `continue-on-error` even though this scenario expects SUCCESS: without
+    # it, an unexpected failure aborts the job at this step with only the
+    # action's own output, and the assertion below -- which is where the
+    # "this is what was expected, this is what happened" message lives --
+    # never runs at all.
     - name: "Scenario 1: clean scan (expect exit 0)"
       id: scan_clean
-      uses: ./
+      continue-on-error: true
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/clean
@@ -229,7 +301,7 @@ jobs:
         VIOLATIONS: ${{ steps.scan_clean.outputs.violations_found }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found=$VIOLATIONS"
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
         if [ "$OUTCOME" != "success" ]; then
           echo "::error::expected the clean-scan scenario to pass, but outcome was '$OUTCOME'"
           exit 1
@@ -246,7 +318,7 @@ jobs:
     - name: "Scenario 2: oversized binary (expect exit 1)"
       id: scan_oversized
       continue-on-error: true
-      uses: ./
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/oversized-binary
@@ -292,12 +364,31 @@ jobs:
           echo "::error::CRITICAL: summary was empty on a FAILED scan step. Same failure mode as violations_found above."
           exit 1
         fi
+        echo "OK: composite-action outputs propagate correctly through a failing, continue-on-error step."
 
+    # Direct CLI invocation, so the job summary it writes is THIS step's own
+    # $GITHUB_STEP_SUMMARY and can still be read back here. See the long
+    # note above the "Set up Python" step for why this cannot be folded into
+    # the assertion on the `uses:` step.
+    - name: "Scenario 2: assert the job summary names the offending path"
+      run: |
+        set -euo pipefail
+        # `|| rc=$?` rather than a bare call + `$?`: the default `run:`
+        # shell is `bash -e`, so a non-zero exit -- which is exactly what
+        # this scenario expects -- would otherwise abort the step before
+        # the assertions below ever run.
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/oversized-binary \
+          --max-text-size-kb 1000 --max-binary-size-kb 200 --fail-on error || rc=$?
+        if [ "$rc" != "1" ]; then
+          echo "::error::expected the CLI to exit 1 on the oversized binary, got exit $rc"
+          exit 1
+        fi
         if ! grep -qF 'data/big.bin' "$GITHUB_STEP_SUMMARY"; then
           echo "::error::expected the job summary to name the offending path data/big.bin"
           exit 1
         fi
-        echo "OK: composite-action outputs propagate correctly through a failing, continue-on-error step."
 
     # --- Scenario 3: fail_on=warn vs fail_on=error, same violation --------
     - name: "Scenario 3: check out the warn-rule fixture"
@@ -306,7 +397,7 @@ jobs:
     - name: "Scenario 3a: fail_on=warn (expect exit 1 on a warn-severity violation)"
       id: scan_warn_strict
       continue-on-error: true
-      uses: ./
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/warn-rule
@@ -318,7 +409,7 @@ jobs:
         VIOLATIONS: ${{ steps.scan_warn_strict.outputs.violations_found }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found=$VIOLATIONS"
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
         if [ "$OUTCOME" != "failure" ]; then
           echo "::error::expected fail_on=warn to fail on a warn-severity violation, but outcome was '$OUTCOME'"
           exit 1
@@ -330,7 +421,8 @@ jobs:
 
     - name: "Scenario 3b: fail_on=error (expect exit 0 on the SAME warn-severity violation)"
       id: scan_warn_lenient
-      uses: ./
+      continue-on-error: true
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/warn-rule
@@ -342,7 +434,7 @@ jobs:
         VIOLATIONS: ${{ steps.scan_warn_lenient.outputs.violations_found }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found=$VIOLATIONS"
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
         if [ "$OUTCOME" != "success" ]; then
           echo "::error::expected fail_on=error to pass on a warn-only violation, but outcome was '$OUTCOME'"
           exit 1
@@ -359,25 +451,38 @@ jobs:
     - name: "Scenario 4: ignore.globs + disallow.extensions + per-rule threshold (expect exit 1)"
       id: scan_yaml_policy
       continue-on-error: true
-      uses: ./
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/yaml-policy
         fail_on: error
 
-    - name: "Scenario 4: assert ignore/disallow/per-rule threshold all applied correctly"
+    - name: "Scenario 4: assert the scan failed with exactly 2 violations"
       env:
         OUTCOME: ${{ steps.scan_yaml_policy.outcome }}
         VIOLATIONS: ${{ steps.scan_yaml_policy.outputs.violations_found }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found=$VIOLATIONS"
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
         if [ "$OUTCOME" != "failure" ]; then
           echo "::error::expected the yaml-policy scenario to fail (disallowed + over-threshold files present), got outcome '$OUTCOME'"
           exit 1
         fi
         if [ "$VIOLATIONS" != "2" ]; then
           echo "::error::expected exactly 2 violations (blocked.exe via disallow.extensions, app.log via the per-rule threshold), got '$VIOLATIONS'"
+          exit 1
+        fi
+
+    # Same reason as scenario 2's content check: the job summary has to be
+    # grepped in the step that produced it.
+    - name: "Scenario 4: assert ignore/disallow/per-rule threshold all applied correctly"
+      run: |
+        set -euo pipefail
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/yaml-policy --fail-on error || rc=$?
+        if [ "$rc" != "1" ]; then
+          echo "::error::expected the CLI to exit 1 on the yaml-policy fixture, got exit $rc"
           exit 1
         fi
         if ! grep -qF 'blocked.exe' "$GITHUB_STEP_SUMMARY"; then
@@ -404,7 +509,7 @@ jobs:
     - name: "Scenario 5: malformed policy file (expect exit 2, not 1)"
       id: scan_malformed
       continue-on-error: true
-      uses: ./
+      uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/malformed-policy
@@ -433,6 +538,19 @@ jobs:
           exit 1
         fi
 
+    # The composite action cannot report a raw exit code, so the 2-vs-1
+    # distinction is pinned down directly here as well.
+    - name: "Scenario 5: assert the CLI's raw exit code is 2"
+      run: |
+        set -euo pipefail
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/malformed-policy --fail-on error || rc=$?
+        if [ "$rc" != "2" ]; then
+          echo "::error::expected exit 2 (EXIT_CONFIG_ERROR) for a malformed policy file, got exit $rc"
+          exit 1
+        fi
+
   # Blocking: `setup.cfg`'s [pycodestyle]/[isort] sections pin every option
   # both tools run with (max line length, import-wrap style, ...), so
   # "formatted" has one objective answer that doesn't depend on whatever
@@ -445,19 +563,24 @@ jobs:
 
     steps:
     - uses: actions/checkout@v5
-      with:
-        fetch-depth: 0
 
+    # NOT '3.x' here, unlike the test matrix: this job is a formatting gate,
+    # and the point of a gate is that it gives the same answer today and in
+    # six months. '3.x' would silently move the interpreter under two
+    # version-pinned, no-longer-actively-released formatters.
     - uses: actions/setup-python@v6
       with:
-        python-version: '3.x'
+        python-version: '3.11'
 
-    # Pinned so a local run (see docs/development.md) and this job always
-    # agree on what "formatted" means; bump both together, deliberately, if
-    # ever needed -- not as a side effect of CI silently picking up a new
-    # release.
+    # Pinned so a local run (see CONTRIBUTING.md) and this job always agree
+    # on what "formatted" means; bump them together, deliberately, if ever
+    # needed -- not as a side effect of CI silently picking up a new
+    # release. pycodestyle is pinned too even though it is only autopep8's
+    # dependency: autopep8 2.3.2 merely requires `pycodestyle >= 2.11.0`, so
+    # leaving it floating would let a new pycodestyle release introduce a
+    # new check and fail this job with no change to this repository.
     - name: Install formatters
-      run: pip install --quiet autopep8==2.3.2 isort==5.13.2
+      run: pip install --quiet autopep8==2.3.2 pycodestyle==2.14.0 isort==5.13.2
 
     - name: Check formatting with autopep8
       run: python -m autopep8 --diff --recursive --exit-code repo_size_guardian tests setup.py

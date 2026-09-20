@@ -38,7 +38,7 @@ on any formatting diff — it does not auto-fix anything, so run the
 formatters yourself before opening a PR:
 
 ```bash
-pip install autopep8==2.3.2 isort==5.13.2
+pip install autopep8==2.3.2 pycodestyle==2.14.0 isort==5.13.2
 
 python -m isort repo_size_guardian tests setup.py
 python -m autopep8 --in-place --recursive repo_size_guardian tests setup.py
@@ -50,6 +50,12 @@ To check without changing anything (what CI runs):
 python -m isort --check-only --diff repo_size_guardian tests setup.py
 python -m autopep8 --diff --recursive --exit-code repo_size_guardian tests setup.py
 ```
+
+`pycodestyle` is pinned alongside them because it is what `autopep8`
+actually evaluates the code with, and `autopep8` itself only requires
+`pycodestyle >= 2.11.0` — leaving it floating would let a new `pycodestyle`
+release introduce a new check and fail the `lint` job with no change to
+this repository.
 
 If you use a different `autopep8`/`isort` version locally and see a diff
 CI doesn't (or vice versa), install the pinned versions above — formatter
