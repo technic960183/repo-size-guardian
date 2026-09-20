@@ -349,7 +349,7 @@ def _escape_annotation_property(text: str) -> str:
 
 
 def emit_annotations(violations: Sequence[Violation], config: ReportConfig,
-                      stream: TextIO = sys.stdout) -> None:
+                     stream: TextIO = sys.stdout) -> None:
     """
     Emit GitHub workflow-command annotations, one per violation.
 

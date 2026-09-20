@@ -44,7 +44,8 @@ class TestGitCatFileSize(GitRepoTestBase):
     def test_binary_file(self):
         """Test getting size of a binary file."""
         binary_content = bytes([i % 256 for i in range(100)])
-        blob_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary file')
+        blob_sha = self.helper.create_and_commit_file(
+            'binary.bin', binary_content, 'Add binary file')
 
         size = git_cat_file_size(blob_sha)
         self.assertEqual(size, len(binary_content))
@@ -74,7 +75,8 @@ class TestGitCatFileContent(GitRepoTestBase):
     def test_binary_file(self):
         """Test getting content of a binary file."""
         binary_content = bytes([i % 256 for i in range(100)])
-        blob_sha = self.helper.create_and_commit_file('binary.bin', binary_content, 'Add binary file')
+        blob_sha = self.helper.create_and_commit_file(
+            'binary.bin', binary_content, 'Add binary file')
 
         result = git_cat_file_content(blob_sha)
         self.assertEqual(result, binary_content)

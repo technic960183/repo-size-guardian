@@ -8,8 +8,7 @@ precedence, rule terminality, disallow lists, global thresholds), the
 
 import unittest
 
-from repo_size_guardian.evaluator import (EvaluationConfig, evaluate_blobs,
-                                           has_failing_violations)
+from repo_size_guardian.evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
 from repo_size_guardian.models import Blob
 from repo_size_guardian.rule_engine import Policy, Rule
 

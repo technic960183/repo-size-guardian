@@ -27,10 +27,10 @@ from repo_size_guardian.reporting import (
 
 
 def make_violation(path='big.bin', blob_sha='a' * 40, commit_sha='c' * 40,
-                    status='A', size_bytes=1024, is_binary=True,
-                    mime_type=None, rule_name='threshold.max_binary_size_kb',
-                    message='File exceeds size threshold', severity='error',
-                    category='size', threshold_kb=None):
+                   status='A', size_bytes=1024, is_binary=True,
+                   mime_type=None, rule_name='threshold.max_binary_size_kb',
+                   message='File exceeds size threshold', severity='error',
+                   category='size', threshold_kb=None):
     """Build a Blob + Violation pair for tests.
 
     A small helper so each test only spells out the fields it cares about.
@@ -131,7 +131,8 @@ class TestFormatConsoleReport(unittest.TestCase):
 
     def test_no_ansi_or_box_drawing_characters(self):
         v = make_violation()
-        text = format_console_report([v], ScanStats(commits_scanned=1, blobs_scanned=1, unique_blobs=1))
+        text = format_console_report([v], ScanStats(
+            commits_scanned=1, blobs_scanned=1, unique_blobs=1))
         self.assertNotIn('\x1b', text)
         for ch in '┌┐└┘│─├┤┬┴┼║╔╗╚╝':
             self.assertNotIn(ch, text)
@@ -170,7 +171,7 @@ class TestFormatStepSummary(unittest.TestCase):
             rule_name='threshold.max_text_size_kb', message='Text file exceeds max_text_size_kb')
         text = format_step_summary([v], ScanStats())
         self.assertIn('| WARN | `notes/plan.md` | 612.0 KB | '
-                       'Text file exceeds max_text_size_kb | `threshold.max_text_size_kb` |', text)
+                      'Text file exceeds max_text_size_kb | `threshold.max_text_size_kb` |', text)
 
     def test_how_to_fix_section_present_and_deduped(self):
         violations = [
@@ -227,7 +228,7 @@ class TestRemediationHint(unittest.TestCase):
 
     def test_always_mentions_history_rewrite(self):
         for category, is_binary in [('size', True), ('size', False),
-                                     ('disallowed', None), ('rule', None)]:
+                                    ('disallowed', None), ('rule', None)]:
             v = make_violation(category=category, is_binary=is_binary)
             hint = remediation_hint(v)
             self.assertIn('later commit', hint.lower())
@@ -427,7 +428,7 @@ class TestWriteGithubOutput(unittest.TestCase):
 
     def test_unwritable_path_warns_on_stderr_and_does_not_raise(self):
         bad_path = os.path.join(tempfile.gettempdir(),
-                                 'repo-size-guardian-does-not-exist-dir', 'gh_output')
+                                'repo-size-guardian-does-not-exist-dir', 'gh_output')
         stderr_capture = io.StringIO()
         import sys
         original_stderr = sys.stderr
@@ -518,7 +519,7 @@ class TestReportOrchestrator(unittest.TestCase):
             summary_path = os.path.join(tmp, 'summary.md')
             output_path = os.path.join(tmp, 'output.txt')
             config = ReportConfig(step_summary_path=summary_path, github_output_path=output_path,
-                                   max_annotations=50)
+                                  max_annotations=50)
             stats = ScanStats(commits_scanned=1, blobs_scanned=2, unique_blobs=2)
             violations = [
                 make_violation(path='a.bin', severity='error', category='size', is_binary=True),

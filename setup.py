@@ -2,7 +2,7 @@
 Setup configuration for repo-size-guardian.
 """
 
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -11,7 +11,10 @@ setup(
     name="repo-size-guardian",
     version="0.1.0",
     author="Yuan-Ming Hsu",
-    description="A GitHub action to prevent large or unwanted files from entering repository history via PRs",
+    description=(
+        "A GitHub action to prevent large or unwanted files from entering "
+        "repository history via PRs"
+    ),
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),

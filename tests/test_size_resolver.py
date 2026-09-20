@@ -10,9 +10,11 @@ import unittest
 from unittest.mock import patch
 
 from repo_size_guardian.models import Blob, Violation
-from repo_size_guardian.size_resolver import (augment_blob_objects_with_sizes,
-                                              get_blob_size,
-                                              get_blob_sizes_batch)
+from repo_size_guardian.size_resolver import (
+    augment_blob_objects_with_sizes,
+    get_blob_size,
+    get_blob_sizes_batch,
+)
 from tests.test_base import GitRepoTestBase
 
 
@@ -67,9 +69,9 @@ class TestGetBlobSizeWithMock(unittest.TestCase):
     def test_calls_git_cat_file_size(self, mock_git_cat_file_size):
         """Test that get_blob_size calls git_cat_file_size."""
         mock_git_cat_file_size.return_value = 1024
-        
+
         result = get_blob_size('abc123')
-        
+
         mock_git_cat_file_size.assert_called_once_with('abc123')
         self.assertEqual(result, 1024)
 
@@ -77,7 +79,7 @@ class TestGetBlobSizeWithMock(unittest.TestCase):
     def test_propagates_value_error(self, mock_git_cat_file_size):
         """Test that ValueError from git_cat_file_size is propagated."""
         mock_git_cat_file_size.side_effect = ValueError("blob_sha cannot be empty")
-        
+
         with self.assertRaises(ValueError):
             get_blob_size('')
 
@@ -187,14 +189,14 @@ class TestAugmentBlobObjectsWithSizesWithMock(unittest.TestCase):
             'sha1': 100,
             'sha2': 200
         }
-        
+
         blobs = [
             Blob(path='file1.txt', blob_sha='sha1', commit_sha='commit1', status='A'),
             Blob(path='file2.txt', blob_sha='sha2', commit_sha='commit2', status='M')
         ]
-        
+
         result = augment_blob_objects_with_sizes(blobs)
-        
+
         self.assertEqual(result[0].size_bytes, 100)
         self.assertEqual(result[1].size_bytes, 200)
 
@@ -202,27 +204,27 @@ class TestAugmentBlobObjectsWithSizesWithMock(unittest.TestCase):
     def test_handles_deleted_files(self, mock_get_blob_sizes_batch):
         """Test that deleted files are handled correctly."""
         mock_get_blob_sizes_batch.return_value = {}
-        
+
         blobs = [
             Blob(path='deleted.txt', blob_sha='', commit_sha='commit1', status='D')
         ]
-        
+
         result = augment_blob_objects_with_sizes(blobs)
-        
+
         self.assertIsNone(result[0].size_bytes)
 
     @patch('repo_size_guardian.size_resolver.get_blob_sizes_batch')
     def test_deduplicates_blob_shas(self, mock_get_blob_sizes_batch):
         """Test that duplicate blob SHAs are deduplicated."""
         mock_get_blob_sizes_batch.return_value = {'sha1': 100}
-        
+
         blobs = [
             Blob(path='file1.txt', blob_sha='sha1', commit_sha='commit1', status='A'),
             Blob(path='file2.txt', blob_sha='sha1', commit_sha='commit2', status='M')
         ]
-        
+
         augment_blob_objects_with_sizes(blobs)
-        
+
         # Should be called with unique blob SHAs only
         mock_get_blob_sizes_batch.assert_called_once()
         call_args = mock_get_blob_sizes_batch.call_args[0][0]

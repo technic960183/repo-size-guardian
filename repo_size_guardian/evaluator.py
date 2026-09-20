@@ -12,8 +12,14 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence
 
 from .models import Blob, Violation
-from .rule_engine import (Policy, Rule, find_matching_rule, matches_extension,
-                           matches_mime, matches_path)
+from .rule_engine import (
+    Policy,
+    Rule,
+    find_matching_rule,
+    matches_extension,
+    matches_mime,
+    matches_path,
+)
 
 
 @dataclass
@@ -39,7 +45,7 @@ class EvaluationConfig:
 
 
 def evaluate_blobs(blobs: Iterable[Blob], policy: Policy,
-                    config: EvaluationConfig) -> List[Violation]:
+                   config: EvaluationConfig) -> List[Violation]:
     """
     Evaluate a stream of blobs against a policy, producing violations.
 
@@ -119,7 +125,7 @@ def has_failing_violations(violations: Sequence[Violation], fail_on: str) -> boo
 
 
 def _evaluate_single_blob(blob: Blob, policy: Policy,
-                           config: EvaluationConfig) -> Optional[Violation]:
+                          config: EvaluationConfig) -> Optional[Violation]:
     """Apply the terminal evaluation order (steps 1-5) to a single blob."""
     ignore_patterns = list(policy.ignore_globs) + list(policy.ignore_paths)
     if matches_path(blob.path, ignore_patterns):
@@ -159,7 +165,7 @@ def _evaluate_rule_match(blob: Blob, rule: Rule) -> Optional[Violation]:
             blob=blob,
             rule_name=rule.id,
             message=(f"File size {size_kb:.1f} KB exceeds rule '{rule.id}' "
-                      f"limit of {rule.size_over_kb:g} KB"),
+                     f"limit of {rule.size_over_kb:g} KB"),
             severity=rule.action,
             category='rule',
             threshold_kb=rule.size_over_kb,
@@ -200,7 +206,7 @@ def _evaluate_disallow_lists(blob: Blob, policy: Policy) -> Optional[Violation]:
 
 
 def _evaluate_global_thresholds(blob: Blob, policy: Policy,
-                                 config: EvaluationConfig) -> Optional[Violation]:
+                                config: EvaluationConfig) -> Optional[Violation]:
     """Apply step 5: the policy/config threshold for the blob's text/binary kind."""
     is_binary = bool(blob.is_binary) if blob.is_binary is not None else False
 

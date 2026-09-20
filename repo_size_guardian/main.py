@@ -470,7 +470,7 @@ def _enumerate_diff_blobs(merge_base: str, head_ref: str, head_sha: str) -> List
 # ---------------------------------------------------------------------------
 
 def _warn_if_nothing_enforced(policy: Policy, was_found: bool, policy_path: str,
-                               args: argparse.Namespace) -> None:
+                              args: argparse.Namespace) -> None:
     """
     Emit a prominent warning if the effective configuration enforces nothing.
 
@@ -571,7 +571,7 @@ def _reverse_commit_order(entries: List[Dict[str, str]]) -> List[Dict[str, str]]
 
 
 def _collect_blobs(scan_mode: str, merge_base: str, head_ref: str,
-                    head_sha: str) -> Tuple[List[Blob], int]:
+                   head_sha: str) -> Tuple[List[Blob], int]:
     """
     Enumerate and build `Blob` objects for the configured scan mode.
 

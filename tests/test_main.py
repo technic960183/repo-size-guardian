@@ -209,7 +209,7 @@ class TestShallowClonePreflight(unittest.TestCase):
 
         def run_git(cwd, *args):
             subprocess.run(['git'] + list(args), cwd=cwd, capture_output=True,
-                            text=True, check=True)
+                           text=True, check=True)
 
         run_git(self.source_dir, 'init', '-q', '--initial-branch=main')
         run_git(self.source_dir, 'config', 'user.name', 'Test User')

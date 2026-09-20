@@ -7,11 +7,14 @@ Tests text vs binary detection using various file types.
 import json
 import subprocess
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from repo_size_guardian.models import Blob
 from repo_size_guardian.type_detector import (
-    augment_blob_objects_with_types, detect_blob_type, detect_blob_types_batch)
+    augment_blob_objects_with_types,
+    detect_blob_type,
+    detect_blob_types_batch,
+)
 from tests.test_base import GitRepoTestBase
 
 
@@ -108,7 +111,8 @@ print("Hello, world!")
         """Test detection of binary files with random bytes."""
         # Create random binary content
         binary_content = bytes([i % 256 for i in range(0, 256, 3)])  # Mix of bytes
-        blob_sha = self.helper.create_and_commit_file('random.bin', binary_content, 'Add random binary')
+        blob_sha = self.helper.create_and_commit_file(
+            'random.bin', binary_content, 'Add random binary')
 
         result = detect_blob_type(blob_sha)
 
@@ -271,9 +275,9 @@ class TestDetectBlobTypeWithMock(unittest.TestCase):
             'mime': 'text/plain',
             'confidence': 'high'
         }
-        
+
         result = detect_blob_type('sha123')
-        
+
         self.assertFalse(result['is_binary'])
         self.assertEqual(result['mime'], 'text/plain')
 
@@ -287,9 +291,9 @@ class TestDetectBlobTypeWithMock(unittest.TestCase):
             'mime': None,
             'confidence': 'medium'
         }
-        
+
         result = detect_blob_type('sha123')
-        
+
         self.assertFalse(result['is_binary'])
         self.assertEqual(result['confidence'], 'medium')
 
@@ -299,7 +303,7 @@ class TestDetectBlobTypeWithMock(unittest.TestCase):
         """Test that error is raised when both methods fail."""
         mock_file_command.return_value = None
         mock_heuristics.return_value = None
-        
+
         with self.assertRaises(subprocess.CalledProcessError):
             detect_blob_type('sha123')
 
@@ -316,9 +320,9 @@ class TestDetectBlobTypesBatchWithMock(unittest.TestCase):
             {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'},
             {'is_binary': True, 'mime': 'application/octet-stream', 'confidence': 'high'}
         ]
-        
+
         result = detect_blob_types_batch(['sha1', 'sha2'])
-        
+
         self.assertEqual(len(result), 2)
         self.assertFalse(result['sha1']['is_binary'])
         self.assertTrue(result['sha2']['is_binary'])
@@ -327,12 +331,13 @@ class TestDetectBlobTypesBatchWithMock(unittest.TestCase):
     def test_skips_nonexistent_blobs(self, mock_git_cat_file_exists):
         """Test that non-existent blobs are skipped."""
         mock_git_cat_file_exists.side_effect = [True, False]
-        
+
         with patch('repo_size_guardian.type_detector.detect_blob_type') as mock_detect:
-            mock_detect.return_value = {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'}
-            
+            mock_detect.return_value = {'is_binary': False,
+                                        'mime': 'text/plain', 'confidence': 'high'}
+
             result = detect_blob_types_batch(['sha1', 'sha2'])
-            
+
             self.assertEqual(len(result), 1)
             self.assertIn('sha1', result)
             self.assertNotIn('sha2', result)
@@ -348,14 +353,14 @@ class TestAugmentBlobObjectsWithTypesWithMock(unittest.TestCase):
             'sha1': {'is_binary': False, 'mime': 'text/plain', 'confidence': 'high'},
             'sha2': {'is_binary': True, 'mime': 'application/octet-stream', 'confidence': 'high'}
         }
-        
+
         blobs = [
             Blob(path='file1.txt', blob_sha='sha1', commit_sha='commit1', status='A'),
             Blob(path='file2.bin', blob_sha='sha2', commit_sha='commit2', status='A')
         ]
-        
+
         result = augment_blob_objects_with_types(blobs)
-        
+
         self.assertFalse(result[0].is_binary)
         self.assertEqual(result[0].mime_type, 'text/plain')
         self.assertTrue(result[1].is_binary)
@@ -365,13 +370,13 @@ class TestAugmentBlobObjectsWithTypesWithMock(unittest.TestCase):
     def test_handles_deleted_files(self, mock_detect_blob_types_batch):
         """Test that deleted files are handled correctly."""
         mock_detect_blob_types_batch.return_value = {}
-        
+
         blobs = [
             Blob(path='deleted.txt', blob_sha='', commit_sha='commit1', status='D')
         ]
-        
+
         result = augment_blob_objects_with_types(blobs)
-        
+
         self.assertIsNone(result[0].is_binary)
         self.assertIsNone(result[0].mime_type)
 

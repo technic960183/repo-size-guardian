@@ -433,18 +433,15 @@ jobs:
           exit 1
         fi
 
-  # Advisory only: the repo is formatted with `autopep8`/`isort` (see
-  # `.vscode/settings.json` and the "Format with autopep8 and isort" commit
-  # history), but no `setup.cfg`/`pyproject.toml` pins their options, so
-  # results depend on whatever version/defaults run in CI and can drift from
-  # whatever was used when the code was last formatted (confirmed locally:
-  # the current tree already has some default-vs-actual formatting drift
-  # that predates this job). This job is diagnostic, not a gate -- it must
-  # never block a PR, and it never rewrites any file.
+  # Blocking: `setup.cfg`'s [pycodestyle]/[isort] sections pin every option
+  # both tools run with (max line length, import-wrap style, ...), so
+  # "formatted" has one objective answer that doesn't depend on whatever
+  # version/defaults happen to run here versus on a contributor's machine --
+  # this job pins the exact same tool versions for that reason. Neither
+  # step rewrites any file; both only report a diff and fail on one.
   lint:
-    name: Lint (non-blocking)
+    name: Lint
     runs-on: ubuntu-latest
-    continue-on-error: true
 
     steps:
     - uses: actions/checkout@v5
@@ -455,13 +452,15 @@ jobs:
       with:
         python-version: '3.x'
 
+    # Pinned so a local run (see docs/development.md) and this job always
+    # agree on what "formatted" means; bump both together, deliberately, if
+    # ever needed -- not as a side effect of CI silently picking up a new
+    # release.
     - name: Install formatters
-      run: pip install --quiet autopep8 isort
+      run: pip install --quiet autopep8==2.3.2 isort==5.13.2
 
     - name: Check formatting with autopep8
-      continue-on-error: true
-      run: python -m autopep8 --diff --recursive repo_size_guardian tests setup.py
+      run: python -m autopep8 --diff --recursive --exit-code repo_size_guardian tests setup.py
 
     - name: Check import order with isort
-      continue-on-error: true
       run: python -m isort --check-only --diff repo_size_guardian tests setup.py

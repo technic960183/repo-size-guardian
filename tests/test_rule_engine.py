@@ -454,7 +454,7 @@ class TestPolicyFromDictValid(unittest.TestCase):
 
     def test_null_sections_are_treated_as_absent(self):
         data = {'ignore': None, 'disallow': None, 'thresholds': None,
-                 'rules': None, 'overrides': None}
+                'rules': None, 'overrides': None}
         policy = Policy.from_dict(data)
         self.assertTrue(policy.is_empty())
 
