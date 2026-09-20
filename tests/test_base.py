@@ -70,13 +70,57 @@ class GitRepoTestHelper:
         result = self.run_git('rev-parse', f'HEAD:{path}')
         return result.stdout.strip()
 
+    def commit_gitlink(self, path: str, message: str,
+                       gitlink_sha: str = '1' * 40) -> str:
+        """Commit a submodule (gitlink) entry at `path`, returning commit SHA.
+
+        The entry is written straight into the index with
+        `git update-index --cacheinfo`, which produces exactly the same
+        `160000` tree entry that `git submodule add` would, without needing a
+        second repository on disk or relaxed `protocol.file` settings. The
+        recorded SHA is a commit of the submodule's own repository and so
+        deliberately names no object in this repository.
+        """
+        self.run_git('update-index', '--add', '--cacheinfo',
+                     f'160000,{gitlink_sha},{path}')
+        self.run_git('commit', '-m', message)
+        return self.run_git('rev-parse', 'HEAD').stdout.strip()
+
     def create_branch(self, branch_name: str):
         """Create and checkout a new branch."""
         self.run_git('checkout', '-b', branch_name)
 
+    def create_orphan_branch(self, branch_name: str):
+        """Create and checkout a branch with no history, so its next commit
+        is a parentless (root) commit."""
+        self.run_git('checkout', '--orphan', branch_name)
+        # Drop the inherited working-tree contents from the index, so the
+        # orphan's first commit introduces only what the test stages. Not an
+        # error if the index was already empty.
+        subprocess.run(
+            ['git', 'rm', '-rf', '--cached', '.'],
+            cwd=self.test_dir,
+            capture_output=True,
+            text=True
+        )
+
     def checkout(self, ref: str):
         """Checkout a reference."""
         self.run_git('checkout', ref)
+
+    def merge_branch(self, branch: str, message: str) -> str:
+        """Merge a branch without fast-forward, returning the merge commit SHA."""
+        self.run_git('merge', '--no-ff', '-m', message, branch)
+        return self.run_git('rev-parse', 'HEAD').stdout.strip()
+
+    def start_conflicting_merge(self, branch: str):
+        """Begin a merge expected to conflict, leaving the conflict unresolved."""
+        return subprocess.run(
+            ['git', 'merge', '--no-ff', branch],
+            cwd=self.test_dir,
+            capture_output=True,
+            text=True
+        )
 
     def delete_file(self, path: str, message: str) -> str:
         """Delete a file and commit the deletion, returning commit SHA."""

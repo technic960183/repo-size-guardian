@@ -6,6 +6,7 @@ commit ranges, and file change detection.
 """
 
 import subprocess
+from unittest import mock
 
 from repo_size_guardian.git_utils import (
     get_blob_sha_at_commit,
@@ -221,6 +222,12 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['status'], 'A')
         self.assertEqual(files[0]['path'], 'file2.txt')
+        # The reported SHA must be the post-image blob, resolved here
+        # independently of how get_diff_files parses diff-tree output.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'file2.txt')
+        )
 
     def test_multiple_files_added(self):
         """Test getting diff files for a commit that adds multiple files."""
@@ -236,16 +243,33 @@ class TestGetDiffFiles(GitRepoTestBase):
         paths = [f['path'] for f in files]
         self.assertIn('file2.txt', paths)
         self.assertIn('file3.txt', paths)
+        for entry in files:
+            self.assertEqual(
+                entry['blob_sha'],
+                get_blob_sha_at_commit(commit_sha, entry['path'])
+            )
 
     def test_file_modified(self):
         """Test getting diff files for a commit that modifies a file."""
-        self.helper.commit_file('file1.txt', 'original', 'Initial commit')
+        parent_sha = self.helper.commit_file('file1.txt', 'original', 'Initial commit')
         commit_sha = self.helper.commit_file('file1.txt', 'modified', 'Modify file1')
 
         files = get_diff_files(commit_sha)
         self.assertEqual(len(files), 1)
         self.assertEqual(files[0]['status'], 'M')
         self.assertEqual(files[0]['path'], 'file1.txt')
+        # For a modification both a pre-image and a post-image blob exist, so
+        # this is where picking the wrong raw field silently reports content
+        # that was never introduced by the commit. Pin the post-image blob,
+        # and assert it is not the pre-image one.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'file1.txt')
+        )
+        self.assertNotEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(parent_sha, 'file1.txt')
+        )
 
     def test_file_deleted(self):
         """Test getting diff files for a commit that deletes a file."""
@@ -261,12 +285,235 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(files[0]['path'], 'file2.txt')
 
     def test_initial_commit_no_parent(self):
-        """Test getting diff files for initial commit (has no parent, returns empty)."""
+        """Test that a root commit's files are reported as additions.
+
+        A parentless commit has nothing to be diffed against implicitly, so
+        without --root git diff-tree prints nothing for it and every file the
+        commit introduces escapes the scan.
+        """
         commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
 
-        # Initial commits have no parent, so diff-tree returns empty
         files = get_diff_files(commit_sha)
-        self.assertEqual(len(files), 0)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['status'], 'A')
+        self.assertEqual(files[0]['path'], 'file1.txt')
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'file1.txt')
+        )
+
+    def test_orphan_root_commit_in_history(self):
+        """Test that a root commit reached mid-history is not skipped.
+
+        An orphan branch merged into a PR puts a second parentless commit in
+        the scanned range; the blob it introduces exists in no other commit.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.create_orphan_branch('orphan')
+        orphan_sha = self.helper.commit_file(
+            'orphan_only.txt', 'only here', 'Orphan root commit')
+
+        # Sanity check: the commit really has no parents.
+        parents = self.helper.run_git(
+            'rev-list', '--parents', '-n', '1', orphan_sha
+        ).stdout.split()
+        self.assertEqual(len(parents) - 1, 0)
+
+        files = get_diff_files(orphan_sha)
+        paths = [f['path'] for f in files]
+        self.assertIn('orphan_only.txt', paths)
+        entry = next(f for f in files if f['path'] == 'orphan_only.txt')
+        self.assertEqual(entry['status'], 'A')
+        self.assertEqual(
+            entry['blob_sha'],
+            get_blob_sha_at_commit(orphan_sha, 'orphan_only.txt')
+        )
+
+    def test_non_ascii_path_is_not_quoted(self):
+        """Test that a non-ASCII path is reported literally.
+
+        With git's default core.quotePath, diff-tree renders 'café.txt' as
+        the literal C-quoted string '"caf\\303\\251.txt"', which matches no
+        real file and breaks any downstream reporting keyed on the path.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        commit_sha = self.helper.commit_file('café.txt', 'unicode', 'Add unicode name')
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['path'], 'café.txt')
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'café.txt')
+        )
+
+    def test_trailing_whitespace_in_path_is_preserved(self):
+        """Test that trailing whitespace in a filename survives parsing.
+
+        'zz trailing ' is a legal filename; stripping the raw diff-tree
+        output eats its trailing space when it is the last entry, so the
+        reported path names a file that does not exist.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        path = 'zz trailing '
+        commit_sha = self.helper.commit_file(path, 'spaces', 'Add trailing-space name')
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['path'], path)
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, path)
+        )
+
+    def test_submodule_gitlink_is_skipped(self):
+        """Test that a submodule entry is not reported as a blob.
+
+        A gitlink's recorded SHA is a commit in the submodule's own
+        repository, so it names no object here and `git cat-file` on it
+        fails. Regular files added alongside it must still be reported.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.create_file('regular.txt', 'regular content')
+        self.helper.run_git('add', 'regular.txt')
+        commit_sha = self.helper.commit_gitlink('mysub', 'Add submodule and a file')
+
+        # Sanity check: the commit really records a gitlink tree entry.
+        tree_entry = self.helper.run_git('ls-tree', commit_sha, 'mysub').stdout
+        self.assertTrue(tree_entry.startswith('160000 commit '), tree_entry)
+
+        files = get_diff_files(commit_sha)
+        paths = [f['path'] for f in files]
+        self.assertEqual(paths, ['regular.txt'])
+        self.assertEqual(files[0]['status'], 'A')
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'regular.txt')
+        )
+
+    def test_submodule_replaced_by_regular_file_is_reported(self):
+        """Test that a file replacing a submodule is still reported.
+
+        Only the post-image mode decides: when a gitlink becomes a real file,
+        the new content is a blob this scanner must see.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.commit_gitlink('mysub', 'Add submodule')
+        self.helper.run_git('rm', '--cached', 'mysub')
+        commit_sha = self.helper.commit_file('mysub', 'now a real file', 'Replace submodule')
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['path'], 'mysub')
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(commit_sha, 'mysub')
+        )
+
+    def test_merge_commit_skips_gitlink_and_keeps_literal_paths(self):
+        """Test that the merge code path parses output the same way.
+
+        A merge is diffed with a second, two-tree-ish diff-tree invocation,
+        which must carry the same -z and gitlink handling as the single-commit
+        form.
+        """
+        self.helper.commit_file('data.txt', 'base', 'Initial commit')
+        self.helper.create_branch('feature')
+        self.helper.create_file('café.txt', 'unicode')
+        self.helper.run_git('add', 'café.txt')
+        self.helper.commit_gitlink('mysub', 'Add submodule and unicode file')
+        self.helper.checkout('main')
+        self.helper.commit_file('main.txt', 'from main', 'Add main file')
+        merge_sha = self.helper.merge_branch('feature', 'Merge feature')
+
+        files = get_diff_files(merge_sha)
+        paths = sorted(f['path'] for f in files)
+        self.assertEqual(paths, ['café.txt'])
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(merge_sha, 'café.txt')
+        )
+
+    def test_merge_commit(self):
+        """Test that a merge commit reports the changes it introduces.
+
+        git diff-tree has no single parent to diff a merge against, so without
+        -m/--cc it prints nothing and every change carried by the merge is
+        invisible.
+        """
+        self.helper.commit_file('data.txt', 'base', 'Initial commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('feature.txt', 'from feature', 'Add feature file')
+        self.helper.checkout('main')
+        self.helper.commit_file('main.txt', 'from main', 'Add main file')
+        merge_sha = self.helper.merge_branch('feature', 'Merge feature')
+
+        files = get_diff_files(merge_sha)
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]['path'], 'feature.txt')
+        self.assertEqual(files[0]['status'], 'A')
+        # A merge is diffed against its first parent explicitly, so pin the
+        # post-image blob it reports for that second code path too.
+        self.assertEqual(
+            files[0]['blob_sha'],
+            get_blob_sha_at_commit(merge_sha, 'feature.txt')
+        )
+
+    def test_octopus_merge_commit(self):
+        """Test that an octopus merge reports first-parent changes exactly once.
+
+        An octopus merge has three or more parents. Diffing against every
+        parent (e.g. with -m) repeats the same change once per parent, so the
+        diff must be taken against the first parent only.
+        """
+        self.helper.commit_file('data.txt', 'base', 'Initial commit')
+
+        for branch in ('feature1', 'feature2', 'feature3'):
+            self.helper.run_git('checkout', '-b', branch, 'main')
+            self.helper.commit_file(f'{branch}.txt', f'from {branch}', f'Add {branch}')
+
+        self.helper.checkout('main')
+        self.helper.commit_file('main.txt', 'from main', 'Add main file')
+        self.helper.run_git('merge', '--no-ff', '-m', 'Octopus merge',
+                            'feature1', 'feature2', 'feature3')
+        merge_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        # Sanity check: this really is an octopus merge (main + 3 branches).
+        parents = self.helper.run_git(
+            'rev-list', '--parents', '-n', '1', merge_sha
+        ).stdout.split()
+        self.assertEqual(len(parents) - 1, 4)
+
+        files = get_diff_files(merge_sha)
+
+        # Each feature file is reported exactly once; main.txt came from the
+        # first parent and so is not part of the merge's own changes.
+        paths = [f['path'] for f in files]
+        self.assertEqual(
+            sorted(paths),
+            ['feature1.txt', 'feature2.txt', 'feature3.txt']
+        )
+        self.assertEqual(len(paths), len(set(paths)))
+        for entry in files:
+            self.assertEqual(entry['status'], 'A')
+            self.assertEqual(
+                entry['blob_sha'],
+                get_blob_sha_at_commit(merge_sha, entry['path'])
+            )
+
+    def test_empty_commit_has_no_changes(self):
+        """Test that a commit identical to its parent reports no files.
+
+        A non-merge, non-root commit with no tree changes makes diff-tree
+        print nothing, so get_diff_files must return an empty list rather
+        than treating that as the merge or malformed-output case.
+        """
+        self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        self.helper.run_git('commit', '--allow-empty', '-m', 'Empty commit')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        files = get_diff_files(commit_sha)
+        self.assertEqual(files, [])
 
     def test_mixed_changes(self):
         """Test getting diff files for a commit with mixed changes."""
@@ -285,6 +532,82 @@ class TestGetDiffFiles(GitRepoTestBase):
         self.assertEqual(status_map['file1.txt'], 'M')
         self.assertEqual(status_map['file2.txt'], 'D')
         self.assertEqual(status_map['file3.txt'], 'A')
+        for entry in files:
+            if entry['status'] == 'D':
+                # Deleted paths have no post-image blob; git reports zeros.
+                self.assertEqual(entry['blob_sha'], '0' * 40)
+            else:
+                self.assertEqual(
+                    entry['blob_sha'],
+                    get_blob_sha_at_commit(commit_sha, entry['path'])
+                )
+
+
+class TestGetDiffFilesMalformedOutput(GitRepoTestBase):
+    """Test the raw-format defensive checks in get_diff_files.
+
+    `git diff-tree --raw -z` never actually produces these shapes with the
+    flags this function passes (rename/copy detection is off, and the
+    metadata/path record shape is otherwise fixed), so subprocess.run is
+    patched to return crafted bytes in place of the real diff-tree output,
+    with every other git invocation (e.g. commit setup) still running for
+    real.
+    """
+
+    def _get_diff_files_with_fake_diff_tree_output(self, commit_sha: str, raw_stdout: bytes):
+        real_run = subprocess.run
+
+        def fake_run(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get('args')
+            if cmd[:2] == ['git', 'diff-tree']:
+                return subprocess.CompletedProcess(cmd, 0, stdout=raw_stdout, stderr=b'')
+            return real_run(*args, **kwargs)
+
+        with mock.patch('repo_size_guardian.git_utils.subprocess.run', side_effect=fake_run):
+            return get_diff_files(commit_sha)
+
+    def test_meta_not_starting_with_colon_raises(self):
+        """A metadata field is expected to always start with ':'."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, b'garbage\0path.txt\0')
+
+    def test_meta_with_wrong_field_count_raises(self):
+        """A metadata field must carry exactly 5 space-separated parts."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = b':100644 100644 ' + b'0' * 40 + b' ' + b'1' * 40  # missing status
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, meta + b'\0path.txt\0')
+
+    def test_missing_path_field_raises(self):
+        """A metadata field with no following path field is malformed."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' A').encode()
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(commit_sha, meta + b'\0')
+
+    def test_rename_status_raises(self):
+        """A rename/copy status carries two paths, which this function,
+        never having requested -M/-C, does not support."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' R100').encode()
+
+        with self.assertRaises(ValueError):
+            self._get_diff_files_with_fake_diff_tree_output(
+                commit_sha, meta + b'\0old.txt\0new.txt\0')
+
+    def test_output_without_trailing_nul_is_still_parsed(self):
+        """The trailing empty field from -z's final NUL is only dropped when
+        present; output missing it must still parse the real records."""
+        commit_sha = self.helper.commit_file('file1.txt', 'content', 'Initial commit')
+        meta = (':100644 100644 ' + '0' * 40 + ' ' + '1' * 40 + ' A').encode()
+        raw_stdout = meta + b'\0path.txt'  # no trailing NUL
+
+        files = self._get_diff_files_with_fake_diff_tree_output(commit_sha, raw_stdout)
+        self.assertEqual(files, [{'status': 'A', 'path': 'path.txt', 'blob_sha': '1' * 40}])
 
 
 class TestGetBlobShaAtCommit(GitRepoTestBase):
