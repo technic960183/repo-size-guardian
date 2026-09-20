@@ -568,6 +568,60 @@ class TestNoMergeBase(GitRepoTestBase):
         self.assertIn('fetch-depth: 0', stderr)
 
 
+class TestMissingCommitInCheckout(GitRepoTestBase):
+    """
+    A PR head (or base) SHA named in the event payload but absent from
+    this checkout -- e.g. a stale `refs/pull/N/merge` ref after a push
+    that conflicts with the base branch -- gets a specific, correctly
+    targeted message. Without this, `git merge-base` fails the same way
+    it would for genuinely unrelated histories, and the generic
+    fetch-depth: 0 / force-push message sends the reader looking at the
+    wrong thing entirely.
+    """
+
+    def _run_with_event(self, base_sha, head_sha):
+        event = {'pull_request': {
+            'base': {'sha': base_sha},
+            'head': {'sha': head_sha},
+        }}
+        # Deliberately not under self.test_dir: tearDown's rmtree of that
+        # directory runs before addCleanup callbacks, which would make the
+        # unlink below fail with FileNotFoundError.
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
+            json.dump(event, handle)
+            event_path = handle.name
+        self.addCleanup(os.unlink, event_path)
+
+        with mock.patch.dict(os.environ, {'GITHUB_EVENT_PATH': event_path}, clear=False):
+            return run_cli([])
+
+    def test_missing_head_sha_gets_specific_message(self):
+        base_sha = self.helper.commit_file('README.md', 'hello', 'Base commit')
+        missing_head_sha = 'f' * 40  # syntactically valid, never committed
+
+        exit_code, _stdout, stderr = self._run_with_event(base_sha, missing_head_sha)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn(missing_head_sha, stderr)
+        self.assertIn('not present in this checkout', stderr)
+        self.assertIn('stale', stderr.lower())
+        self.assertIn('merge ref', stderr.lower())
+        # Must not send the reader chasing the unrelated fetch-depth fix.
+        self.assertNotIn('fetch-depth', stderr)
+
+    def test_missing_base_sha_gets_specific_message(self):
+        head_sha = self.helper.commit_file('README.md', 'hello', 'Head commit')
+        missing_base_sha = 'e' * 40  # syntactically valid, never committed
+
+        exit_code, _stdout, stderr = self._run_with_event(missing_base_sha, head_sha)
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn(missing_base_sha, stderr)
+        self.assertIn('not present in this checkout', stderr)
+        self.assertIn('force-pushed', stderr.lower())
+        self.assertNotIn('fetch-depth', stderr)
+
+
 class TestNumericInputValidation(GitRepoTestBase):
     """Negative numeric inputs are typos, and must not degrade silently."""
 

@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import __version__
 from .evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
-from .git_utils import get_diff_files_between, get_merge_base, list_commits
+from .git_utils import get_diff_files_between, get_merge_base, git_cat_file_exists, list_commits
 from .load_branch import enumerate_changed_blobs
 from .models import Blob
 from .reporting import ReportConfig, ScanStats, emit_error_annotation, report
@@ -303,6 +303,55 @@ def _resolve_sha(ref: str) -> str:
     return result.stdout.strip()
 
 
+def _missing_object_message(ref: str, side: str) -> Optional[str]:
+    """
+    Build a specific ConfigError message when `ref` names no object at all
+    in this checkout, or return None if `ref` does resolve to something.
+
+    `git merge-base` fails identically (non-zero exit, often with no
+    stderr at all) whether the two commits genuinely share no common
+    ancestor, or one side simply isn't an object this checkout has ever
+    seen. The generic message below points at `fetch-depth: 0` and
+    force-pushes either way, which is actively misleading for the most
+    common real cause of a *missing head*: `pull_request.head.sha` (from
+    the event payload) naming a commit that GitHub's `refs/pull/N/merge`
+    ref -- what `actions/checkout` actually fetches for a `pull_request`
+    event -- no longer points at. This typically happens after a push to
+    the PR branch that now conflicts with the base branch, at which point
+    GitHub stops updating the merge ref. `fetch-depth: 0` does not fix
+    this at all: there is nothing missing from history, the specific
+    commit named in the event payload just isn't the one that got
+    checked out. Checking with `git cat-file -e` (via `git_cat_file_exists`,
+    already used by type_detector.py) is cheap and disambiguates the two
+    cases before falling back to the generic message.
+
+    Args:
+        ref: The base or head ref/SHA that was passed to `git merge-base`.
+        side: 'head' or 'base', to pick the right wording.
+
+    Returns:
+        A specific ConfigError message if `ref` is not a resolvable
+        object in this checkout, else None.
+    """
+    if git_cat_file_exists(ref):
+        return None
+    if side == 'head':
+        return (
+            f"the PR head commit `{ref}` from the event payload is not "
+            "present in this checkout. This usually means GitHub's merge "
+            "ref for this PR is stale, which can happen after a push that "
+            "conflicts with the base branch. Re-run the workflow, or push "
+            "an empty commit to refresh the PR."
+        )
+    return (
+        f"the PR base commit `{ref}` from the event payload is not present "
+        "in this checkout. This usually means the base branch was "
+        "force-pushed after this checkout's history was fetched. Re-run "
+        "the workflow, or pass base_ref/--base-ref explicitly to pin a "
+        "specific commit."
+    )
+
+
 def _merge_base_or_config_error(base_ref: str, head_ref: str) -> str:
     """
     Compute the merge-base of two refs, or raise an actionable ConfigError.
@@ -313,6 +362,11 @@ def _merge_base_or_config_error(base_ref: str, head_ref: str) -> str:
     Letting that surface as a bare `CalledProcessError` would print
     "git command failed: Command '[...]' returned non-zero exit status 1",
     which tells the user nothing about what to do.
+
+    Before falling back to that generic message, checks whether `head_ref`
+    (then `base_ref`) is actually an object in this checkout at all --
+    see `_missing_object_message` for why that case needs its own,
+    differently-targeted message.
 
     Args:
         base_ref: Base ref (older side).
@@ -328,6 +382,11 @@ def _merge_base_or_config_error(base_ref: str, head_ref: str) -> str:
     try:
         merge_base = get_merge_base(base_ref, head_ref)
     except subprocess.CalledProcessError as exc:
+        missing = (_missing_object_message(head_ref, 'head')
+                   or _missing_object_message(base_ref, 'base'))
+        if missing:
+            raise ConfigError(missing) from exc
+
         stderr = exc.stderr
         if isinstance(stderr, bytes):  # pragma: no cover - get_merge_base uses text=True
             stderr = stderr.decode('utf-8', errors='replace')
