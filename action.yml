@@ -86,7 +86,10 @@ runs:
       run: |
         set -euo pipefail
 
-        python -m pip install --quiet --disable-pip-version-check "${ACTION_PATH}"
+        # --retries/--timeout make the install resilient to transient PyPI
+        # hiccups instead of failing the whole job on a blip.
+        python -m pip install --quiet --disable-pip-version-check \
+          --retries 5 --timeout 30 "${ACTION_PATH}"
 
         # Every input is optional at this level: an input that is absent, or
         # explicitly set to an empty string, falls back to the CLI's own

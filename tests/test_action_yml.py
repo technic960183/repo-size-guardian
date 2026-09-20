@@ -62,7 +62,7 @@ class TestActionInputsMatchCli(unittest.TestCase):
         # as an argparse error on a real PR run.
         used = set(re.findall(r'(?<![\w-])--[a-z][a-z0-9-]*', self.script))
         # pip's own flags are not ours.
-        used -= {'--quiet', '--disable-pip-version-check'}
+        used -= {'--quiet', '--disable-pip-version-check', '--retries', '--timeout'}
         unknown = sorted(used - self.cli_flags)
         self.assertEqual(unknown, [], "flags used in action.yml but unknown to the CLI")
 

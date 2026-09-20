@@ -348,6 +348,55 @@ class TestResolveRefs(unittest.TestCase):
             with self.assertRaises(main_module.ConfigError):
                 main_module.resolve_refs(self._args())
 
+    def test_non_pull_request_event_names_the_event_in_the_error(self):
+        # This tool is PR-only by design; the most common way to hit this
+        # path is `on: push` (or another trigger) instead of
+        # `on: pull_request`. The error should say so explicitly rather
+        # than a generic "couldn't resolve a ref" message.
+        with mock.patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}, clear=True):
+            with self.assertRaises(main_module.ConfigError) as caught:
+                main_module.resolve_refs(self._args())
+        message = str(caught.exception)
+        self.assertIn('pull_request', message)
+        self.assertIn("'push'", message)
+        self.assertIn('on: pull_request', message)
+
+    def test_unknown_event_name_falls_back_to_a_generic_message(self):
+        # No $GITHUB_EVENT_NAME at all (e.g. a bare local/CI invocation with
+        # no other resolution source available) must not crash building the
+        # message, and should still mention that only pull_request works.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(main_module.ConfigError) as caught:
+                main_module.resolve_refs(self._args())
+        self.assertIn('pull_request', str(caught.exception))
+
+
+class TestNonPullRequestEventCli(GitRepoTestBase):
+    """
+    End-to-end: running the CLI with no explicit refs on a non-pull_request
+    event must exit 2 with a message naming the actual triggering event,
+    not a generic "couldn't resolve a ref" failure.
+    """
+
+    def test_push_event_exits_two_with_actionable_message(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+
+        env = dict(os.environ)
+        # A real push-triggered run would not have these set; strip them so
+        # the CLI actually falls through to the new error path instead of
+        # accidentally resolving a ref from the *test process's* own
+        # environment.
+        env.pop('GITHUB_EVENT_PATH', None)
+        env.pop('GITHUB_BASE_REF', None)
+        env['GITHUB_EVENT_NAME'] = 'push'
+
+        with mock.patch.dict(os.environ, env, clear=True):
+            exit_code, _stdout, stderr = run_cli(['--max-text-size-kb', '1000'])
+
+        self.assertEqual(exit_code, 2)
+        self.assertIn('pull_request', stderr)
+        self.assertIn("'push'", stderr)
+
 
 class TestBooleanParsing(unittest.TestCase):
     """--dedupe-blobs/--annotate-pr arrive as strings and must be parsed as such."""

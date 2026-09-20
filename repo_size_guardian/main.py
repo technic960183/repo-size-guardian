@@ -226,16 +226,53 @@ def resolve_refs(args: argparse.Namespace) -> Tuple[str, str]:
         if github_base_ref:
             base_ref = f'origin/{github_base_ref}'
     if not base_ref:
-        raise ConfigError(
-            "Could not resolve a base ref to compare against. Provide "
-            "--base-ref explicitly, run this action on a 'pull_request' "
-            "event (so $GITHUB_EVENT_PATH carries pull_request.base.sha), "
-            "or set $GITHUB_BASE_REF."
-        )
+        raise ConfigError(_no_base_ref_message())
 
     head_ref = args.head_ref or _event_sha(pull_request, 'head') or 'HEAD'
 
     return base_ref, head_ref
+
+
+def _no_base_ref_message() -> str:
+    """
+    Build the error for when no base ref could be resolved from any source.
+
+    This is deliberately a PR-only tool: it needs `pull_request.base.sha`/
+    `pull_request.head.sha` from the event payload (or an explicit
+    `base_ref`/`head_ref`) to know what range to scan. The single most
+    common way to hit this is wiring the workflow to `on: push` (or leaving
+    the default trigger) instead of `on: pull_request` -- in which case
+    `$GITHUB_EVENT_NAME` names the actual event, and the message should say
+    so explicitly rather than making the user guess from a generic
+    "couldn't resolve a ref" failure.
+
+    A local CLI invocation with explicit `--base-ref`/`--head-ref` never
+    reaches this function at all (it short-circuits resolution above), so
+    this message is only ever seen when auto-detection was expected to work
+    and didn't.
+
+    Returns:
+        The `ConfigError` message.
+    """
+    event_name = os.environ.get('GITHUB_EVENT_NAME')
+    if event_name and event_name != 'pull_request':
+        cause = (
+            f"repo-size-guardian only supports the 'pull_request' event, but "
+            f"this run was triggered by a {event_name!r} event, which has no "
+            "pull request to diff against."
+        )
+    else:
+        cause = (
+            "Could not resolve a base ref to compare against: no "
+            "'pull_request' event payload was found, and $GITHUB_BASE_REF is "
+            "not set."
+        )
+    return (
+        f"{cause} Fix: either set this workflow's trigger to `on: "
+        "pull_request`, or supply `base_ref`/`head_ref` explicitly (the "
+        "action's `base_ref`/`head_ref` inputs, or `--base-ref`/`--head-ref` "
+        "on the CLI)."
+    )
 
 
 def _resolve_sha(ref: str) -> str:
