@@ -1,6 +1,7 @@
 # repo-size-guardian
 
-[![codecov](https://codecov.io/gh/technic960183/repo-size-guardian/graph/badge.svg?token=CODECOV_TOKEN)](https://codecov.io/gh/technic960183/repo-size-guardian)
+[![CI](https://github.com/technic960183/repo-size-guardian/actions/workflows/ci.yml/badge.svg)](https://github.com/technic960183/repo-size-guardian/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/technic960183/repo-size-guardian/graph/badge.svg)](https://codecov.io/gh/technic960183/repo-size-guardian)
 
 repo-size-guardian is a GitHub Action that blocks large or disallowed files
 from entering your repository's Git history through a pull request. Unlike a
@@ -290,6 +291,16 @@ you which one you hit:
   extension/MIME matching semantics.
 - [docs/examples.md](docs/examples.md) — copy-pasteable workflows and
   policy files, including the recommended warn-only rollout path.
+- [docs/development.md](docs/development.md) — local dev setup and running
+  the test suite.
+
+## Contributing
+
+Bug reports and pull requests are welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, running the tests, the
+formatting requirement enforced by CI, and how to report a bug (including
+how to tell a configuration error you need to fix apart from an actual bug
+in this tool — see [Exit codes](#exit-codes) above).
 
 ## License
 

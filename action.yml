@@ -1,5 +1,5 @@
 name: 'Repo Size Guardian'
-description: 'A GitHub action to prevent large or unwanted files from entering repository history via PRs'
+description: "Blocks large or disallowed files from entering your repo's Git history via PRs, not just the final diff."
 author: 'Yuan-Ming Hsu'
 
 inputs:

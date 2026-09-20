@@ -12,8 +12,8 @@ setup(
     version="0.1.0",
     author="Yuan-Ming Hsu",
     description=(
-        "A GitHub action to prevent large or unwanted files from entering "
-        "repository history via PRs"
+        "Blocks large or disallowed files from entering your repo's Git "
+        "history via PRs, not just the final diff."
     ),
     long_description=long_description,
     long_description_content_type="text/markdown",
