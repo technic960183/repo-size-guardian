@@ -11,11 +11,13 @@ from unittest import mock
 from repo_size_guardian.git_utils import (
     get_blob_sha_at_commit,
     get_diff_files,
+    get_diff_files_between,
     get_merge_base,
     git_cat_file_content,
     git_cat_file_exists,
     git_cat_file_size,
     list_commits,
+    parse_raw_diff_z,
 )
 from tests.test_base import GitRepoTestBase
 
@@ -649,3 +651,104 @@ class TestGetBlobShaAtCommit(GitRepoTestBase):
         blob_sha2 = get_blob_sha_at_commit(commit2, 'file2.txt')
 
         self.assertEqual(blob_sha1, blob_sha2)
+
+
+class TestGetDiffFilesBetween(GitRepoTestBase):
+    """
+    Two-tree diffs, used by `scan_mode=diff`.
+
+    This shares `parse_raw_diff_z` with `get_diff_files`; these tests exist
+    so the two callers cannot drift apart on the awkward cases (gitlinks,
+    deletions, NUL-separated and non-ASCII paths) the way two hand-copied
+    parsers would.
+    """
+
+    def test_reports_net_additions_and_modifications(self):
+        base = self.helper.commit_file('a.txt', 'one', 'Base')
+        self.helper.commit_file('a.txt', 'two', 'Modify a')
+        head = self.helper.commit_file('b.txt', 'new', 'Add b')
+
+        changes = get_diff_files_between(base, head)
+        by_path = {change['path']: change for change in changes}
+        self.assertEqual(set(by_path), {'a.txt', 'b.txt'})
+        self.assertEqual(by_path['a.txt']['status'], 'M')
+        self.assertEqual(by_path['b.txt']['status'], 'A')
+        self.assertEqual(len(by_path['b.txt']['blob_sha']), 40)
+
+    def test_collapses_intermediate_states(self):
+        # A blob added and then removed between the two trees does not
+        # appear at all: this is exactly why `diff` mode is weaker than
+        # `history` mode, and it must stay true.
+        base = self.helper.commit_file('a.txt', 'one', 'Base')
+        self.helper.create_and_commit_file('transient.bin', b'\x00' * 100, 'Add')
+        self.helper.delete_file('transient.bin', 'Remove')
+        head = self.helper.commit_file('a.txt', 'two', 'Modify a')
+
+        paths = [change['path'] for change in get_diff_files_between(base, head)]
+        self.assertEqual(paths, ['a.txt'])
+
+    def test_deletion_reports_all_zero_blob_sha(self):
+        base = self.helper.commit_file('gone.txt', 'bye', 'Base')
+        head = self.helper.delete_file('gone.txt', 'Delete it')
+
+        changes = get_diff_files_between(base, head)
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0]['status'], 'D')
+        self.assertEqual(changes[0]['blob_sha'], '0' * 40)
+
+    def test_gitlink_entries_are_skipped(self):
+        base = self.helper.commit_file('a.txt', 'one', 'Base')
+        head = self.helper.commit_gitlink('vendor/sub', 'Add submodule')
+
+        paths = [change['path'] for change in get_diff_files_between(base, head)]
+        self.assertNotIn('vendor/sub', paths)
+
+    def test_non_ascii_and_whitespace_paths_survive_intact(self):
+        base = self.helper.commit_file('a.txt', 'one', 'Base')
+        self.helper.create_file('caf\u00e9/r\u00e9sum\u00e9 v2 .txt', 'x')
+        self.helper.run_git('add', '.')
+        self.helper.run_git('commit', '-m', 'Add awkward path')
+        head = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        paths = [change['path'] for change in get_diff_files_between(base, head)]
+        self.assertIn('caf\u00e9/r\u00e9sum\u00e9 v2 .txt', paths)
+
+    def test_identical_trees_produce_no_changes(self):
+        base = self.helper.commit_file('a.txt', 'one', 'Base')
+        self.assertEqual(get_diff_files_between(base, base), [])
+
+    def test_matches_get_diff_files_for_a_single_commit(self):
+        # The two entry points must agree: a two-tree diff of parent..commit
+        # is the same change set as the single-commit diff of that commit.
+        self.helper.commit_file('a.txt', 'one', 'Base')
+        self.helper.commit_file('a.txt', 'two', 'Modify a')
+        self.helper.create_and_commit_file('b.bin', b'\x00' * 50, 'Add b')
+        head = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+        parent = self.helper.run_git('rev-parse', 'HEAD~1').stdout.strip()
+
+        self.assertEqual(get_diff_files_between(parent, head), get_diff_files(head))
+
+
+class TestParseRawDiffZ(GitRepoTestBase):
+    """Direct tests for the shared raw-diff parser."""
+
+    def test_empty_output_is_no_changes(self):
+        self.assertEqual(parse_raw_diff_z(b''), [])
+
+    def test_rename_status_is_rejected_rather_than_misparsed(self):
+        # A rename record carries two paths, which would desynchronise the
+        # metadata/path pairing and silently mis-attribute every subsequent
+        # blob. Rename detection is never requested, so this must raise.
+        raw = (b':100644 100644 ' + b'a' * 40 + b' ' + b'b' * 40 + b' R100\0'
+               b'old.txt\0new.txt\0')
+        with self.assertRaises(ValueError):
+            parse_raw_diff_z(raw)
+
+    def test_truncated_record_is_rejected(self):
+        raw = b':100644 100644 ' + b'a' * 40 + b' ' + b'b' * 40 + b' M\0'
+        with self.assertRaises(ValueError):
+            parse_raw_diff_z(raw)
+
+    def test_garbage_output_is_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_raw_diff_z(b'not a diff record\0')

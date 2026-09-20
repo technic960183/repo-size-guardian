@@ -161,6 +161,122 @@ def _is_merge_commit(commit_sha: str) -> bool:
     return result.returncode == 0
 
 
+#: Flags shared by every `git diff-tree` invocation in this module.
+#:
+#: `--raw` reports each change's post-image blob SHA in the same record as
+#: its status, so callers need no separate `git rev-parse <commit>:<path>`.
+#: `-z` makes records NUL-separated and prints paths literally: without it
+#: git C-quotes any path holding non-ASCII bytes or special characters
+#: (`caf\303\251.txt`), and trailing whitespace in the final path would be
+#: indistinguishable from the trailing newline of the output.
+_DIFF_TREE_FLAGS = ['--no-commit-id', '--raw', '--no-abbrev', '-r', '-z']
+
+
+def parse_raw_diff_z(out: bytes) -> List[Dict[str, str]]:
+    """
+    Parse the `-z` raw output of `git diff-tree` into change records.
+
+    This is the single implementation of raw-diff parsing used by every
+    caller in this package (both the per-commit diff of `get_diff_files`
+    and the two-tree diff of `get_diff_files_between`), so that the
+    gitlink, rename, NUL and path-decoding handling below cannot drift
+    between them.
+
+    With `-z` the output is a flat sequence of NUL-terminated fields, in
+    which each change contributes two of them:
+      ":<old_mode> <new_mode> <old_sha> <new_sha> <status>\\0<path>\\0"
+    Splitting on NUL therefore yields alternating metadata and path fields,
+    plus one empty trailing field from the final terminator. Only that
+    artifact is dropped: paths themselves are used verbatim, so a filename
+    ending in whitespace keeps it. Paths are decoded the way the OS decodes
+    filenames, since -z prints them as the raw bytes they are on disk.
+
+    Submodule (gitlink) entries, recognisable by their `160000` post-image
+    mode, are skipped: their SHA is a commit in the submodule's own
+    repository rather than a blob in this one. An entry whose *pre*-image
+    was a gitlink but whose post-image is a regular file (a submodule
+    replaced by a file) is a normal blob change and is reported as usual.
+
+    Args:
+        out: Raw bytes written by `git diff-tree ... -z`.
+
+    Returns:
+        List of dicts with keys: status, path, blob_sha. `blob_sha` is the
+        full 40-character post-image blob SHA, all zeros for deletions.
+
+    Raises:
+        ValueError: If a record is not in the expected raw format (e.g. a
+            rename/copy record with two paths, which no caller requests via
+            -M/-C and so is not supported).
+    """
+    entries: List[Dict[str, str]] = []
+    if not out:
+        return entries
+
+    fields = [os.fsdecode(field) for field in out.split(b'\0')]
+    if fields and fields[-1] == '':
+        fields.pop()
+
+    records = iter(fields)
+    for meta in records:
+        if not meta.startswith(':'):
+            raise ValueError(f"Unexpected diff output format: {meta}")
+
+        meta_fields = meta[1:].split(' ')
+        if len(meta_fields) != 5:
+            raise ValueError(f"Unexpected diff output format: {meta}")
+        _old_mode, new_mode, _old_sha, new_sha, status = meta_fields
+
+        path = next(records, None)
+        if path is None:
+            raise ValueError(f"Unexpected diff output format: {meta}")
+
+        if status.startswith(('R', 'C')):
+            # Rename/copy status (e.g. "R100") carries two paths, and so
+            # would desynchronise the metadata/path pairing above. Rename
+            # /copy detection is never requested, so such a status is
+            # unexpected.
+            raise ValueError(f"Unexpected diff output format: {meta}")
+
+        if new_mode == _GITLINK_MODE:
+            # Submodule entry: the SHA names a commit in another repository,
+            # not a blob here, so there is nothing for a blob scan to check.
+            continue
+
+        entries.append({'status': status, 'path': path, 'blob_sha': new_sha})
+    return entries
+
+
+def get_diff_files_between(base_ref: str, head_ref: str) -> List[Dict[str, str]]:
+    """
+    Get the net changed files between two tree-ishes, as one diff.
+
+    Unlike `get_diff_files`, which diffs a single commit against its
+    parent, this compares two arbitrary commits directly. Callers wanting
+    "what a PR introduces" must pass the *merge-base* as `base_ref`, not
+    the base branch tip: a direct tip-to-head diff also reports files the
+    base branch changed after the PR branched, which the PR never touched.
+
+    Args:
+        base_ref: The diff's base (older side); normally a merge-base.
+        head_ref: The diff's head (newer side).
+
+    Returns:
+        List of dicts with keys: status, path, blob_sha. See
+        `parse_raw_diff_z`.
+
+    Raises:
+        subprocess.CalledProcessError: If git command fails
+        ValueError: If the output is not in the expected raw format
+    """
+    result = subprocess.run(
+        ['git', 'diff-tree'] + _DIFF_TREE_FLAGS + [base_ref, head_ref],
+        capture_output=True,
+        check=True
+    )
+    return parse_raw_diff_z(result.stdout)
+
+
 def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
     """
     Get status, path, and post-image blob SHA for the changed files in a
@@ -209,7 +325,7 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
             raw format (e.g. a rename/copy record with two paths, which this
             function does not request via -M/-C and so does not support)
     """
-    diff_flags = ['--no-commit-id', '--raw', '--no-abbrev', '-r', '--root', '-z']
+    diff_flags = _DIFF_TREE_FLAGS + ['--root']
 
     result = subprocess.run(
         ['git', 'diff-tree'] + diff_flags + [commit_sha],
@@ -239,50 +355,7 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         )
         out = result.stdout
 
-    entries: List[Dict[str, str]] = []
-    if not out:
-        return entries
-
-    # With -z the output is a flat sequence of NUL-terminated fields, in
-    # which each change contributes two of them:
-    #   ":<old_mode> <new_mode> <old_sha> <new_sha> <status>\0<path>\0"
-    # Splitting on NUL therefore yields alternating metadata and path fields,
-    # plus one empty trailing field from the final terminator. Only that
-    # artifact is dropped: paths themselves are used verbatim, so a filename
-    # ending in whitespace keeps it. Paths are decoded the way the OS decodes
-    # filenames, since -z prints them as the raw bytes they are on disk.
-    fields = [os.fsdecode(field) for field in out.split(b'\0')]
-    if fields and fields[-1] == '':
-        fields.pop()
-
-    records = iter(fields)
-    for meta in records:
-        if not meta.startswith(':'):
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        meta_fields = meta[1:].split(' ')
-        if len(meta_fields) != 5:
-            raise ValueError(f"Unexpected diff output format: {meta}")
-        _old_mode, new_mode, _old_sha, new_sha, status = meta_fields
-
-        path = next(records, None)
-        if path is None:
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        if status.startswith(('R', 'C')):
-            # Rename/copy status (e.g. "R100") carries two paths, and so
-            # would desynchronise the metadata/path pairing above. This
-            # function never requests rename/copy detection, so such a
-            # status is unexpected.
-            raise ValueError(f"Unexpected diff output format: {meta}")
-
-        if new_mode == _GITLINK_MODE:
-            # Submodule entry: the SHA names a commit in another repository,
-            # not a blob here, so there is nothing for a blob scan to check.
-            continue
-
-        entries.append({'status': status, 'path': path, 'blob_sha': new_sha})
-    return entries
+    return parse_raw_diff_z(out)
 
 
 def get_blob_sha_at_commit(commit_sha: str, path: str) -> str:
