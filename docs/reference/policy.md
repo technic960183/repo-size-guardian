@@ -52,12 +52,11 @@ result.
 |---|---|---|---|
 | 1 | `ignore.globs`, `ignore.paths` | Pass | |
 | 2 | `overrides.allow_globs` | Pass | |
-| 3 | The first rule in `rules` that matches the file | Violation if the rule has no `size_over_kb` or the file is larger; otherwise pass | The rule's `id` |
+| 3 | The first rule in `rules` that matches the file | Violation if the rule has no `size_over_kb` or the file is larger; otherwise pass. Steps 4 and 5 don't run. | The rule's `id` |
 | 4 | `disallow.extensions`, then `disallow.globs`, then `disallow.mime_types` | Error | `disallow.extensions`, `disallow.globs`, `disallow.mime_types` |
 | 5 | The size limit for the file's kind: the policy's `thresholds` value, else the input | Error if larger | `threshold.max_text_size_kb`, `threshold.max_binary_size_kb` |
 | – | Nothing applied | Pass | |
 
-A file that matches a rule is decided at step 3, even when it passes there.
 Deleted files are not checked.
 
 ## Sizes
@@ -72,7 +71,8 @@ A file's kind comes from its content, not its name.
 
 - With the `file` command: MIME types `text/*`, `application/json`,
   `application/xml`, `application/javascript` and empty files are text.
-  Everything else is binary.
+  Everything else is binary; for example, an SVG is `image/svg+xml`, so it's
+  binary. Run `file --mime <path>` to see a file's MIME type.
 - Without it: a file containing a null byte, or mostly non-printable
   characters, is binary.
 - A file whose kind can't be determined is checked against the text size

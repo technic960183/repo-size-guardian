@@ -55,8 +55,8 @@ no line number.
 
 - The action adds up to `max_annotations` (default 10), then one notice
   saying how many more were left out.
-- GitHub shows at most 10 error and 10 warning annotations per step, whatever
-  `max_annotations` says.
+- GitHub shows at most 10 error, 10 warning and 10 notice annotations per
+  step, whatever `max_annotations` says.
 - An annotation appears on the "Files changed" tab only if the file is in
   the pull request's final diff. A file added and deleted within the pull
   request has its annotation on the Checks tab.

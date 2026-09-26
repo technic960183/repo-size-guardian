@@ -34,6 +34,9 @@ at this point? If it helps a different reader, it goes on that reader's page.
 The reference has the full detail. Other pages give enough to act, then link
 to it. Reference headings are link targets, so keep them stable.
 
+The README changes when the answer to "Is this worth trying?" changes: a new
+capability, not a new option.
+
 ## Voice
 
 Read the README and the policy guide before writing: an example first, short

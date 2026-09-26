@@ -45,8 +45,8 @@ ignore:
     - "**/*.min.js"
 ```
 
-Ignored paths are never checked. Globs match the whole path from the
-repository root, so `*.min.js` matches only files at the top level;
+Ignored paths are never checked, not even against `disallow`. Globs match the
+whole path from the repository root, so `*.min.js` matches only files at the top level;
 `**/*.min.js` matches them in every folder. See [Globs](reference/policy.md#globs)
 for the full syntax.
 
