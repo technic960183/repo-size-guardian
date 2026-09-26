@@ -4,11 +4,12 @@
 [![codecov](https://codecov.io/gh/technic960183/repo-size-guardian/graph/badge.svg)](https://codecov.io/gh/technic960183/repo-size-guardian)
 
 Keep large files out of your Git history, including the ones a pull request
-adds and then deletes.
+adds in one commit and deletes in a later one.
 
-A file committed and removed in a later commit still lives in your history,
-and in every clone, for good. Most size checks only look at the final diff;
-repo-size-guardian checks every commit a pull request brings in.
+Such a file still lives in your history, and in every clone, for good. Most
+size checks only look at the final diff; repo-size-guardian checks every
+commit a pull request brings in, and blocks the files you don't want before
+they enter your repository.
 
 ![Job summary of a pull request blocked by repo-size-guardian](https://raw.githubusercontent.com/technic960183/repo-size-guardian/resource/images/job-summary.png)
 

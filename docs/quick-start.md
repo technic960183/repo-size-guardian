@@ -78,6 +78,12 @@ would still be in your history.
 On your first run, check that `Commits scanned` matches the number of commits
 in the pull request.
 
+## 6. Block merging (optional)
+
+A failing check doesn't stop a merge on its own. To block pull requests that
+fail it, make `scan` a required status check in a
+[branch protection rule](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/managing-a-branch-protection-rule#creating-a-branch-protection-rule).
+
 ## Next
 
 - [Policy guide](policy-guide.md): write a policy that fits your repository.
