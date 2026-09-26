@@ -92,7 +92,9 @@ class Violation:
     blob: Blob
     rule_name: str
     message: str
-    severity: str = 'error'  # 'error', 'warning', 'info'
+    severity: str = 'error'  # 'warn' | 'error'
+    category: str = 'size'  # 'size' | 'disallowed' | 'rule'  (for summary counts by type)
+    threshold_kb: Optional[float] = None  # the limit that was exceeded, if size-related
 
     @property
     def path(self) -> str:
@@ -113,3 +115,10 @@ class Violation:
     def size_bytes(self) -> Optional[int]:
         """Get the file size for this violation."""
         return self.blob.size_bytes
+
+    @property
+    def size_kb(self) -> Optional[float]:
+        """Get the file size in kilobytes for this violation, or None if unknown."""
+        if self.size_bytes is None:
+            return None
+        return self.size_bytes / 1024.0

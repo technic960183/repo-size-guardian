@@ -12,70 +12,578 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.8', '3.11']
+        # '3.11' is the top of the range setup.py's `python_requires`/
+        # classifiers declare, and the only leg that collects coverage.
+        #
+        # '3.x' is a *second*, separate leg: action.yml's own "Setup Python"
+        # step pins `python-version: '3.x'` (always whatever is newest), so
+        # the package's real production runtime is NOT bounded by the
+        # declared 3.8-3.11 range -- it silently tracks whatever '3.x'
+        # resolves to on the day a consumer's workflow runs. This leg exists
+        # to catch a forward-compatibility break on that actual runtime
+        # before a consumer does.
+        #
+        # '3.8' is a deliberately supported target (setup.py's
+        # python_requires floor) and is confirmed to provision fine on
+        # ubuntu-latest. Do not re-investigate its EOL status or runner
+        # availability, and do not propose dropping it.
+        python-version: ['3.8', '3.11', '3.x']
 
     steps:
-    - uses: actions/checkout@v4
-    
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
-    
+
     - name: Install package in development mode
       run: |
         pip install -e .
-    
+
     - name: Install coverage
       if: matrix.python-version == '3.11'
       run: |
         pip install coverage
-    
+
     - name: Run tests with coverage
       if: matrix.python-version == '3.11'
       run: |
         coverage run -m unittest discover tests -v
-    
+
     - name: Run tests without coverage
       if: matrix.python-version != '3.11'
       run: |
         python -m unittest discover tests -v
-    
+
     - name: Generate coverage report
       if: matrix.python-version == '3.11'
       run: |
         coverage xml
-    
+
     - name: Upload coverage to Codecov
       if: matrix.python-version == '3.11'
       uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ./coverage.xml
-        fail_ci_if_error: true
-    
+        # A transient Codecov outage or a not-yet-configured CODECOV_TOKEN
+        # secret must not fail a CI run whose actual tests all passed --
+        # coverage reporting is informational, not a correctness gate.
+        # (Previously `true`: that made this job's pass/fail depend on a
+        # third-party upload having nothing to do with the code under test.)
+        fail_ci_if_error: false
+
     - name: Test CLI no-op
       run: |
         python -m repo_size_guardian --version
 
+  # End-to-end self-test: actually runs the packaged action, via
+  # `uses: ./.rsg-action`, against synthetic PRs with known, deliberately-
+  # crafted violations, and asserts on its real exit code and its real
+  # `outputs.*` -- not just that it ran without crashing (the previous
+  # placeholder's only check).
+  #
+  # Nothing in this project has ever executed inside a real GitHub Actions
+  # runner before this job exists. The single most important thing it
+  # proves is in "critical: outputs survive a failing step" below.
   self-test:
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'pull_request'
-    
+
+    env:
+      # Where the action's own source is parked so that building the fixture
+      # history in $GITHUB_WORKSPACE cannot destroy it. Must stay in sync
+      # with the `uses: ./.rsg-action` references below, which cannot use an
+      # expression (`uses:` is not evaluated against `env`).
+      ACTION_DIR: .rsg-action
+
     steps:
-    - uses: actions/checkout@v4
+    - name: Check out repo-size-guardian
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
-    
-    - name: Set up Python
-      uses: actions/setup-python@v4
+
+    # "Build synthetic fixture git history" below turns this very checkout
+    # into a set of synthetic, disposable git branches, and its
+    # `git clean -fdx` deletes EVERY file in $GITHUB_WORKSPACE -- including
+    # `action.yml` and `repo_size_guardian/` themselves. So two things are
+    # copied out of the working tree first:
+    #
+    #   1. the handful of tiny policy YAMLs and probe files the fixtures are
+    #      built from (tests/fixtures/), and
+    #   2. the action's own source, as a tar of the tree at HEAD.
+    #
+    # (2) is what the first run of this job got wrong: it ran `uses: ./`
+    # against a workspace whose `action.yml` the fixture builder had just
+    # deleted, and every scenario died with "Can't find 'action.yml' ...
+    # under '/home/runner/work/...'". `git archive HEAD` rather than a `cp`
+    # is deliberate -- it captures exactly the tracked tree a consumer of
+    # this action would get, and nothing else.
+    - name: Stage the action source and fixture inputs outside the working tree
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/fixtures"
+        cp -r tests/fixtures/. "${RUNNER_TEMP}/fixtures/"
+        git archive --format=tar -o "${RUNNER_TEMP}/action-src.tar" HEAD
+
+    # Every scenario below is a real, disconnected commit history built
+    # entirely on this disposable runner, on branches that are never pushed
+    # or merged anywhere. This -- rather than either a second nested repo,
+    # or committing large/oversized files straight into tests/fixtures/ --
+    # is deliberate: this tool exists to keep large/unwanted blobs OUT of a
+    # repo's permanent history, so committing a 300KB+ random binary just to
+    # have something for it to flag would be exactly the kind of repo bloat
+    # it's meant to prevent. `head -c`/`dd`-style synthesis at build time
+    # gets the same test coverage without ever writing that content to any
+    # branch this project actually keeps.
+    #
+    # `--orphan` + `git rm --cached` + `git clean -fdx` produces a genuinely
+    # empty base commit, with no history shared with this repo's real
+    # commits. `fetch-depth: 0` above matters here for a second reason
+    # beyond the obvious: `git rev-parse --is-shallow-repository` (the very
+    # first check main.py's `run()` makes) inspects the WHOLE repository's
+    # shallow-grafts, not just the branch under test -- a shallow initial
+    # checkout would still read as shallow after adding brand-new, fully
+    # local commits on top of it, and every scenario below would fail
+    # immediately with exit code 2 before ever reaching the logic under
+    # test.
+    - name: Build synthetic fixture git history
+      run: |
+        set -euo pipefail
+        FIXTURES="${RUNNER_TEMP}/fixtures"
+        git config user.email "ci@example.invalid"
+        git config user.name "repo-size-guardian self-test"
+
+        git checkout --orphan fixture/base
+        git rm -rf --cached . >/dev/null
+        git clean -fdxq
+        git commit --allow-empty -m "fixture: empty base"
+
+        # Scenario 1 -- clean scan: one small, unremarkable text file.
+        # Expected: exit 0, violations_found == 0.
+        git checkout -b fixture/clean fixture/base
+        cp "${FIXTURES}/clean-notes.txt" notes.txt
+        git add notes.txt
+        git commit -q -m "fixture: clean small text file"
+
+        # Scenario 2 -- oversized binary: 300 KiB of random bytes, over a
+        # 200 KB max_binary_size_kb threshold. Expected: exit 1,
+        # violations_found > 0, data/big.bin named in the job summary. This
+        # is also the vehicle for the critical outputs-survive-failure
+        # check below.
+        git checkout -b fixture/oversized-binary fixture/base
+        mkdir -p data
+        head -c 307200 /dev/urandom > data/big.bin
+        git add data/big.bin
+        git commit -q -m "fixture: oversized binary"
+
+        # Scenario 3 -- a single warn-severity rule match: a 58.6 KB log
+        # file against a rule with `size_over_kb: 50` and `action: warn`.
+        # Run twice downstream with different `fail_on` values against this
+        # exact same commit, to prove `fail_on` alone flips the exit code
+        # without changing what was found.
+        git checkout -b fixture/warn-rule fixture/base
+        mkdir -p .github
+        cp "${FIXTURES}/policies/warn-severity-rule.yml" .github/repo-size-guardian.yml
+        head -c 60000 /dev/zero | tr '\0' 'x' > output.log
+        git add .github/repo-size-guardian.yml output.log
+        git commit -q -m "fixture: warn-severity rule + violating log file"
+
+        # Scenario 4 -- the full YAML policy path in one real scan:
+        # ignore.globs (vendor/** hides a disallowed-and-oversized file
+        # entirely), disallow.extensions (a small .exe is still blocked
+        # regardless of size), and a per-rule size_over_kb threshold (a
+        # 58.6 KB log is blocked, a 9.8 KB one is not). This is also what
+        # proves PyYAML installs and parses correctly through a real,
+        # from-scratch `pip install` of the packaged action -- the unit
+        # tests exercise the YAML parsing code directly, but never through
+        # the actual install path a consumer goes through.
+        git checkout -b fixture/yaml-policy fixture/base
+        mkdir -p .github vendor
+        cp "${FIXTURES}/policies/yaml-policy-full.yml" .github/repo-size-guardian.yml
+        cp "${FIXTURES}/blocked.exe" blocked.exe
+        head -c 512000 /dev/urandom > vendor/huge-ignored.exe
+        head -c 60000 /dev/zero | tr '\0' 'y' > app.log
+        head -c 10000 /dev/zero | tr '\0' 'z' > app-small.log
+        git add .github/repo-size-guardian.yml vendor blocked.exe app.log app-small.log
+        git commit -q -m "fixture: yaml policy (ignore/disallow/per-rule threshold)"
+
+        # Scenario 5 -- a malformed (unparsable) policy file. Expected:
+        # exit 2 (EXIT_CONFIG_ERROR), which must stay distinguishable from
+        # exit 1 (violations found) from the calling workflow's side.
+        git checkout -b fixture/malformed-policy fixture/base
+        mkdir -p .github
+        cp "${FIXTURES}/policies/malformed-policy.yml" .github/repo-size-guardian.yml
+        cp "${FIXTURES}/placeholder.txt" placeholder.txt
+        git add .github/repo-size-guardian.yml placeholder.txt
+        git commit -q -m "fixture: malformed policy file"
+
+    # Unpacked only now, AFTER the `git clean -fdx` above, so the wipe can
+    # never reach it. It stays untracked on every fixture branch, which is
+    # harmless: the scan walks commits in the `fixture/base..fixture/*`
+    # range, never the working tree, and `git checkout` between branches
+    # does not touch untracked paths. (Verified locally by replaying this
+    # whole sequence in a throwaway clone.)
+    #
+    # A second `actions/checkout` with `path:` would also work, but it would
+    # land inside the same workspace and so has to be sequenced just as
+    # carefully -- for one extra network round-trip and a second copy of the
+    # git history.
+    - name: Restore the action's own source where the fixture wipe cannot reach it
+      run: |
+        set -euo pipefail
+        mkdir -p "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+        tar -xf "${RUNNER_TEMP}/action-src.tar" -C "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+        # Fail here, with a comprehensible message, rather than several
+        # steps later inside the runner's local-action resolver.
+        test -f "${GITHUB_WORKSPACE}/${ACTION_DIR}/action.yml"
+        test -f "${GITHUB_WORKSPACE}/${ACTION_DIR}/setup.py"
+
+    # The scenarios below assert two different things, and they need two
+    # different mechanisms:
+    #
+    #   * exit code + `steps.<id>.outputs.*` -- only observable through a
+    #     real `uses:` step, so those assertions go through the action.
+    #   * which paths the Markdown job summary actually names -- NOT
+    #     observable from a later step. `$GITHUB_STEP_SUMMARY` is a fresh,
+    #     empty file for every step (GitHub: "GITHUB_STEP_SUMMARY is unique
+    #     for each step in a job"); the runner harvests each step's file
+    #     when that step ends and only collates them on the run summary
+    #     page. The first version of this job grepped
+    #     `$GITHUB_STEP_SUMMARY` from the step AFTER the action ran, which
+    #     could only ever have grepped an empty file.
+    #
+    # So the job-summary content is asserted by invoking the CLI directly
+    # inside a single step and grepping that step's OWN summary file, in the
+    # same step, before the runner takes it away. That needs the package
+    # importable outside the composite action, hence the explicit setup +
+    # install here. '3.x' matches the interpreter action.yml itself pins, so
+    # the composite action's own "Setup Python" is a cache hit rather than a
+    # second, different runtime.
+    - name: Set up Python for the direct-CLI assertions
+      uses: actions/setup-python@v6
       with:
         python-version: '3.x'
-    
-    - name: Test action (placeholder)
-      uses: ./
+
+    - name: Install the packaged action for the direct-CLI assertions
+      run: |
+        set -euo pipefail
+        python -m pip install --quiet --disable-pip-version-check \
+          --retries 5 --timeout 30 "${GITHUB_WORKSPACE}/${ACTION_DIR}"
+
+    # --- Scenario 1: clean scan -------------------------------------------
+    - name: "Scenario 1: check out the clean fixture"
+      run: git checkout fixture/clean
+
+    # `continue-on-error` even though this scenario expects SUCCESS: without
+    # it, an unexpected failure aborts the job at this step with only the
+    # action's own output, and the assertion below -- which is where the
+    # "this is what was expected, this is what happened" message lives --
+    # never runs at all.
+    - name: "Scenario 1: clean scan (expect exit 0)"
+      id: scan_clean
+      continue-on-error: true
+      uses: ./.rsg-action
       with:
+        base_ref: fixture/base
+        head_ref: fixture/clean
         max_text_size_kb: 1000
         max_binary_size_kb: 200
+        fail_on: error
+
+    - name: "Scenario 1: assert exit 0 and violations_found == 0"
+      env:
+        OUTCOME: ${{ steps.scan_clean.outcome }}
+        VIOLATIONS: ${{ steps.scan_clean.outputs.violations_found }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        if [ "$OUTCOME" != "success" ]; then
+          echo "::error::expected the clean-scan scenario to pass, but outcome was '$OUTCOME'"
+          exit 1
+        fi
+        if [ "$VIOLATIONS" != "0" ]; then
+          echo "::error::expected violations_found=0 for a clean scan, got '$VIOLATIONS'"
+          exit 1
+        fi
+
+    # --- Scenario 2: oversized binary (+ THE critical outputs check) ------
+    - name: "Scenario 2: check out the oversized-binary fixture"
+      run: git checkout fixture/oversized-binary
+
+    - name: "Scenario 2: oversized binary (expect exit 1)"
+      id: scan_oversized
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/oversized-binary
+        max_text_size_kb: 1000
+        max_binary_size_kb: 200
+        fail_on: error
+
+    - name: "Scenario 2 [CRITICAL]: violation detected, and outputs survive the failure"
+      env:
+        OUTCOME: ${{ steps.scan_oversized.outcome }}
+        VIOLATIONS: ${{ steps.scan_oversized.outputs.violations_found }}
+        SUMMARY: ${{ steps.scan_oversized.outputs.summary }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS' summary='$SUMMARY'"
+
+        # A step that was SUPPOSED to fail must actually have failed --
+        # otherwise this whole scenario (and the critical check below it)
+        # is silently testing nothing.
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::expected the oversized-binary scenario to FAIL (exit 1), but outcome was '$OUTCOME'"
+          exit 1
+        fi
+
+        # THE CRITICAL CHECK. repo_size_guardian/main.py writes
+        # violations_found/summary to $GITHUB_OUTPUT and only THEN returns
+        # exit code 1 -- that half is proven by the unit tests and by local
+        # verification against the real CLI. What has never been proven is
+        # whether the Actions RUNNER still relays a FAILED step's
+        # $GITHUB_OUTPUT into steps.<id>.outputs, and whether that survives
+        # being re-exposed through a composite action's own `outputs:`
+        # mapping (action.yml's violations_found/summary both read
+        # steps.scan.outputs.*, and the internal "scan" step has no
+        # continue-on-error of its own). If the answer to either is "no",
+        # these two outputs are silently empty on every failing run, and
+        # any consumer workflow's `if: steps.x.outputs.violations_found > 0`
+        # is dead code that has never once fired.
+        if [ -z "$VIOLATIONS" ] || [ "$VIOLATIONS" = "0" ]; then
+          echo "::error::CRITICAL: violations_found was empty/zero on a FAILED scan step (got '$VIOLATIONS'). GITHUB_OUTPUT written by a failing composite-action step is not reaching steps.<id>.outputs on this runner -- violations_found/summary are broken for every consumer that branches on them after a failing scan."
+          exit 1
+        fi
+        if [ -z "$SUMMARY" ]; then
+          echo "::error::CRITICAL: summary was empty on a FAILED scan step. Same failure mode as violations_found above."
+          exit 1
+        fi
+        echo "OK: composite-action outputs propagate correctly through a failing, continue-on-error step."
+
+    # Direct CLI invocation, so the job summary it writes is THIS step's own
+    # $GITHUB_STEP_SUMMARY and can still be read back here. See the long
+    # note above the "Set up Python" step for why this cannot be folded into
+    # the assertion on the `uses:` step.
+    - name: "Scenario 2: assert the job summary names the offending path"
+      run: |
+        set -euo pipefail
+        # `|| rc=$?` rather than a bare call + `$?`: the default `run:`
+        # shell is `bash -e`, so a non-zero exit -- which is exactly what
+        # this scenario expects -- would otherwise abort the step before
+        # the assertions below ever run.
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/oversized-binary \
+          --max-text-size-kb 1000 --max-binary-size-kb 200 --fail-on error || rc=$?
+        if [ "$rc" != "1" ]; then
+          echo "::error::expected the CLI to exit 1 on the oversized binary, got exit $rc"
+          exit 1
+        fi
+        if ! grep -qF 'data/big.bin' "$GITHUB_STEP_SUMMARY"; then
+          echo "::error::expected the job summary to name the offending path data/big.bin"
+          exit 1
+        fi
+
+    # --- Scenario 3: fail_on=warn vs fail_on=error, same violation --------
+    - name: "Scenario 3: check out the warn-rule fixture"
+      run: git checkout fixture/warn-rule
+
+    - name: "Scenario 3a: fail_on=warn (expect exit 1 on a warn-severity violation)"
+      id: scan_warn_strict
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/warn-rule
         fail_on: warn
+
+    - name: "Scenario 3a: assert exit 1"
+      env:
+        OUTCOME: ${{ steps.scan_warn_strict.outcome }}
+        VIOLATIONS: ${{ steps.scan_warn_strict.outputs.violations_found }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::expected fail_on=warn to fail on a warn-severity violation, but outcome was '$OUTCOME'"
+          exit 1
+        fi
+        if [ "$VIOLATIONS" != "1" ]; then
+          echo "::error::expected exactly 1 violation, got '$VIOLATIONS'"
+          exit 1
+        fi
+
+    - name: "Scenario 3b: fail_on=error (expect exit 0 on the SAME warn-severity violation)"
+      id: scan_warn_lenient
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/warn-rule
+        fail_on: error
+
+    - name: "Scenario 3b: assert exit 0, same violation still counted"
+      env:
+        OUTCOME: ${{ steps.scan_warn_lenient.outcome }}
+        VIOLATIONS: ${{ steps.scan_warn_lenient.outputs.violations_found }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        if [ "$OUTCOME" != "success" ]; then
+          echo "::error::expected fail_on=error to pass on a warn-only violation, but outcome was '$OUTCOME'"
+          exit 1
+        fi
+        if [ "$VIOLATIONS" != "1" ]; then
+          echo "::error::expected violations_found=1 even though the job passed (fail_on doesn't erase the violation), got '$VIOLATIONS'"
+          exit 1
+        fi
+
+    # --- Scenario 4: full YAML policy path ---------------------------------
+    - name: "Scenario 4: check out the yaml-policy fixture"
+      run: git checkout fixture/yaml-policy
+
+    - name: "Scenario 4: ignore.globs + disallow.extensions + per-rule threshold (expect exit 1)"
+      id: scan_yaml_policy
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/yaml-policy
+        fail_on: error
+
+    - name: "Scenario 4: assert the scan failed with exactly 2 violations"
+      env:
+        OUTCOME: ${{ steps.scan_yaml_policy.outcome }}
+        VIOLATIONS: ${{ steps.scan_yaml_policy.outputs.violations_found }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::expected the yaml-policy scenario to fail (disallowed + over-threshold files present), got outcome '$OUTCOME'"
+          exit 1
+        fi
+        if [ "$VIOLATIONS" != "2" ]; then
+          echo "::error::expected exactly 2 violations (blocked.exe via disallow.extensions, app.log via the per-rule threshold), got '$VIOLATIONS'"
+          exit 1
+        fi
+
+    # Same reason as scenario 2's content check: the job summary has to be
+    # grepped in the step that produced it.
+    - name: "Scenario 4: assert ignore/disallow/per-rule threshold all applied correctly"
+      run: |
+        set -euo pipefail
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/yaml-policy --fail-on error || rc=$?
+        if [ "$rc" != "1" ]; then
+          echo "::error::expected the CLI to exit 1 on the yaml-policy fixture, got exit $rc"
+          exit 1
+        fi
+        if ! grep -qF 'blocked.exe' "$GITHUB_STEP_SUMMARY"; then
+          echo "::error::expected blocked.exe (disallow.extensions) to be named in the job summary"
+          exit 1
+        fi
+        if ! grep -qF 'app.log' "$GITHUB_STEP_SUMMARY"; then
+          echo "::error::expected app.log (per-rule size_over_kb threshold) to be named in the job summary"
+          exit 1
+        fi
+        if grep -qF 'huge-ignored' "$GITHUB_STEP_SUMMARY"; then
+          echo "::error::vendor/huge-ignored.exe should have been excluded by ignore.globs but was flagged anyway"
+          exit 1
+        fi
+        if grep -qF 'app-small.log' "$GITHUB_STEP_SUMMARY"; then
+          echo "::error::app-small.log is under the 50KB rule threshold and should not have been flagged"
+          exit 1
+        fi
+
+    # --- Scenario 5: malformed policy file --------------------------------
+    - name: "Scenario 5: check out the malformed-policy fixture"
+      run: git checkout fixture/malformed-policy
+
+    - name: "Scenario 5: malformed policy file (expect exit 2, not 1)"
+      id: scan_malformed
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/malformed-policy
+        fail_on: error
+
+    - name: "Scenario 5: assert the config-error path (exit 2) is distinguishable from violations (exit 1)"
+      env:
+        OUTCOME: ${{ steps.scan_malformed.outcome }}
+        VIOLATIONS: ${{ steps.scan_malformed.outputs.violations_found }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::expected the malformed-policy scenario to fail, got outcome '$OUTCOME'"
+          exit 1
+        fi
+        # A malformed policy file raises PolicyError inside main.py's run()
+        # BEFORE report()/write_github_output() is ever reached (load_policy
+        # happens first) -- so, unlike scenario 2 above, violations_found/
+        # summary are never written at all here. This is how exit 2 (config
+        # error) stays distinguishable from exit 1 (real violations) purely
+        # from what the composite action exposes to a caller, since it does
+        # not expose a raw numeric exit code.
+        if [ -n "$VIOLATIONS" ]; then
+          echo "::error::expected violations_found to be UNSET for a config error (exit 2), but got '$VIOLATIONS' -- exit 1 and exit 2 are no longer distinguishable from the caller's side"
+          exit 1
+        fi
+
+    # The composite action cannot report a raw exit code, so the 2-vs-1
+    # distinction is pinned down directly here as well.
+    - name: "Scenario 5: assert the CLI's raw exit code is 2"
+      run: |
+        set -euo pipefail
+        rc=0
+        python -m repo_size_guardian \
+          --base-ref fixture/base --head-ref fixture/malformed-policy --fail-on error || rc=$?
+        if [ "$rc" != "2" ]; then
+          echo "::error::expected exit 2 (EXIT_CONFIG_ERROR) for a malformed policy file, got exit $rc"
+          exit 1
+        fi
+
+  # Blocking: `setup.cfg`'s [pycodestyle]/[isort] sections pin every option
+  # both tools run with (max line length, import-wrap style, ...), so
+  # "formatted" has one objective answer that doesn't depend on whatever
+  # version/defaults happen to run here versus on a contributor's machine --
+  # this job pins the exact same tool versions for that reason. Neither
+  # step rewrites any file; both only report a diff and fail on one.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v5
+
+    # NOT '3.x' here, unlike the test matrix: this job is a formatting gate,
+    # and the point of a gate is that it gives the same answer today and in
+    # six months. '3.x' would silently move the interpreter under two
+    # version-pinned, no-longer-actively-released formatters.
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.11'
+
+    # Pinned so a local run (see CONTRIBUTING.md) and this job always agree
+    # on what "formatted" means; bump them together, deliberately, if ever
+    # needed -- not as a side effect of CI silently picking up a new
+    # release. pycodestyle is pinned too even though it is only autopep8's
+    # dependency: autopep8 2.3.2 merely requires `pycodestyle >= 2.11.0`, so
+    # leaving it floating would let a new pycodestyle release introduce a
+    # new check and fail this job with no change to this repository.
+    - name: Install formatters
+      run: pip install --quiet autopep8==2.3.2 pycodestyle==2.14.0 isort==5.13.2
+
+    - name: Check formatting with autopep8
+      run: python -m autopep8 --diff --recursive --exit-code repo_size_guardian tests setup.py
+
+    - name: Check import order with isort
+      run: python -m isort --check-only --diff repo_size_guardian tests setup.py

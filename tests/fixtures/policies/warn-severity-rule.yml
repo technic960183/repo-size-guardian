@@ -1,0 +1,15 @@
+# Fixture policy for the CI self-test's "fail_on: warn vs error" case
+# (.github/workflows/ci.yml, self-test job).
+#
+# Defines exactly one rule at `action: warn`. The self-test pairs this
+# policy with a single oversized log file and runs the action twice, once
+# with `fail_on: warn` and once with `fail_on: error`, to prove the same
+# warn-severity violation produces different exit codes depending on the
+# `fail_on` input.
+rules:
+  - id: large-log-warn
+    description: "Warn (do not block) on log files over 50KB"
+    match:
+      extensions: ["log"]
+    size_over_kb: 50
+    action: warn

@@ -1,0 +1,20 @@
+# Minimal PEP 517 build-backend declaration.
+#
+# This exists purely to de-risk `pip install`: without a `pyproject.toml`,
+# a project with no build backend declared can fall back to pip's legacy
+# `setup.py bdist_wheel`/`setup.py install` mechanism, which pip is
+# removing (see https://github.com/pypa/pip/issues/6334 -- pip's own
+# deprecation warning for this names "25.3" as the version that enforces
+# it). The composite action `pip install`s this package on every consumer
+# run, so a future pip release breaking that path would break the action
+# for everyone.
+#
+# `setup.py` remains the actual source of package metadata (name, version,
+# dependencies, entry points, etc.) -- this file deliberately does not
+# duplicate any of that into a `[project]` table. That would be a bigger
+# packaging migration than this change is meant to be.
+[build-system]
+# setuptools>=64 is required for PEP 660 editable installs
+# (`pip install -e .`); anything older only supports regular installs.
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"

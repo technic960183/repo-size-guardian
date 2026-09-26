@@ -28,7 +28,7 @@ def _detect_type_with_file_command(blob_sha: str) -> Optional[Dict[str, Any]]:
     try:
         # Get blob content and write to temporary file
         content = git_cat_file_content(blob_sha)
-        
+
         with tempfile.NamedTemporaryFile(delete=False) as temp_file:
             temp_file.write(content)
             temp_path = temp_file.name

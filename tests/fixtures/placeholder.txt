@@ -1,0 +1,4 @@
+Placeholder file for the CI self-test's "malformed policy" case
+(.github/workflows/ci.yml, self-test job). Its only purpose is to give that
+scenario's commit a non-empty, unrelated tree entry alongside the
+deliberately-broken policy file.

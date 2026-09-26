@@ -1,0 +1,3 @@
+This is a small, legitimate text file used by the CI self-test's "clean scan"
+case (.github/workflows/ci.yml, self-test job). It is well under any size
+threshold and should never trigger a violation.

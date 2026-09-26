@@ -1,5 +1,5 @@
 name: 'Repo Size Guardian'
-description: 'A GitHub action to prevent large or unwanted files from entering repository history via PRs'
+description: "Blocks large or disallowed files from entering your repo's Git history via PRs, not just the final diff."
 author: 'Yuan-Ming Hsu'
 
 inputs:
@@ -29,40 +29,96 @@ inputs:
     description: 'Add PR annotations for violations'
     required: false
     default: 'true'
+  max_annotations:
+    description: >-
+      Maximum number of GitHub annotations to emit (0 = unlimited). GitHub
+      itself caps annotations per step to 10 warnings + 10 errors + 10
+      notices regardless of this setting; the job summary is not subject
+      to that cap and always lists every violation.
+    required: false
+    default: '10'
+  base_ref:
+    description: 'Explicit base ref/SHA to diff from (overrides auto-detection)'
+    required: false
+  head_ref:
+    description: 'Explicit head ref/SHA to diff to (overrides auto-detection)'
+    required: false
 
 outputs:
   violations_found:
     description: 'Number of violations found'
+    value: ${{ steps.scan.outputs.violations_found }}
   summary:
     description: 'Summary of scan results'
+    value: ${{ steps.scan.outputs.summary }}
 
 runs:
   using: 'composite'
   steps:
     - name: Setup Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       with:
         python-version: '3.x'
-    
+
     - name: Run repo-size-guardian
+      id: scan
       shell: bash
+      # Inputs are passed through the environment, never interpolated into
+      # the script body. A `${{ inputs.x }}` expression is substituted into
+      # the script *before* bash parses it, so an input carrying shell
+      # metacharacters would be executed -- and `base_ref`/`head_ref` are
+      # routinely wired to `github.head_ref`, which on a fork PR is an
+      # attacker-chosen branch name (git allows `$`, backticks, quotes and
+      # `;` in ref names).
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        INPUT_MAX_TEXT_SIZE_KB: ${{ inputs.max_text_size_kb }}
+        INPUT_MAX_BINARY_SIZE_KB: ${{ inputs.max_binary_size_kb }}
+        INPUT_POLICY_PATH: ${{ inputs.policy_path }}
+        INPUT_FAIL_ON: ${{ inputs.fail_on }}
+        INPUT_SCAN_MODE: ${{ inputs.scan_mode }}
+        INPUT_DEDUPE_BLOBS: ${{ inputs.dedupe_blobs }}
+        INPUT_ANNOTATE_PR: ${{ inputs.annotate_pr }}
+        INPUT_MAX_ANNOTATIONS: ${{ inputs.max_annotations }}
+        INPUT_BASE_REF: ${{ inputs.base_ref }}
+        INPUT_HEAD_REF: ${{ inputs.head_ref }}
+        # Keep the *consumer's* working directory off sys.path: we run from
+        # ${GITHUB_WORKSPACE}, and without this a repository that happens to
+        # contain a `yaml.py`/`yaml/` or `repo_size_guardian/` entry would
+        # shadow our own imports. Ignored by Python < 3.11.
+        PYTHONSAFEPATH: '1'
       run: |
-        cd ${{ github.action_path }}
-        pip install -e .
-        args=(
-          --policy-path "${{ inputs.policy_path }}"
-          --fail-on "${{ inputs.fail_on }}"
-          --scan-mode "${{ inputs.scan_mode }}"
-          --dedupe-blobs "${{ inputs.dedupe_blobs }}"
-          --annotate-pr "${{ inputs.annotate_pr }}"
-        )
-        if [ -n "${{ inputs.max_text_size_kb }}" ]; then
-          args+=(--max-text-size-kb "${{ inputs.max_text_size_kb }}")
-        fi
-        if [ -n "${{ inputs.max_binary_size_kb }}" ]; then
-          args+=(--max-binary-size-kb "${{ inputs.max_binary_size_kb }}")
-        fi
-        python -m repo_size_guardian "${args[@]}"
+        set -euo pipefail
+
+        # --retries/--timeout make the install resilient to transient PyPI
+        # hiccups instead of failing the whole job on a blip.
+        python -m pip install --quiet --disable-pip-version-check \
+          --retries 5 --timeout 30 "${ACTION_PATH}"
+
+        # Every input is optional at this level: an input that is absent, or
+        # explicitly set to an empty string, falls back to the CLI's own
+        # default rather than being passed through as "".
+        args=()
+        add_arg() {
+          if [ -n "$2" ]; then
+            args+=("$1" "$2")
+          fi
+        }
+        add_arg --policy-path "${INPUT_POLICY_PATH:-}"
+        add_arg --fail-on "${INPUT_FAIL_ON:-}"
+        add_arg --scan-mode "${INPUT_SCAN_MODE:-}"
+        add_arg --dedupe-blobs "${INPUT_DEDUPE_BLOBS:-}"
+        add_arg --annotate-pr "${INPUT_ANNOTATE_PR:-}"
+        add_arg --max-annotations "${INPUT_MAX_ANNOTATIONS:-}"
+        add_arg --max-text-size-kb "${INPUT_MAX_TEXT_SIZE_KB:-}"
+        add_arg --max-binary-size-kb "${INPUT_MAX_BINARY_SIZE_KB:-}"
+        add_arg --base-ref "${INPUT_BASE_REF:-}"
+        add_arg --head-ref "${INPUT_HEAD_REF:-}"
+
+        # Scan the consumer's repository, not this action's own checkout.
+        cd "${GITHUB_WORKSPACE}"
+        # ${args[@]+...} keeps `set -u` happy if every input was empty.
+        python -m repo_size_guardian ${args[@]+"${args[@]}"}
 
 branding:
   icon: 'shield'
