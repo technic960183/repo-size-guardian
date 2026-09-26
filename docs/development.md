@@ -44,7 +44,7 @@ python -m repo_size_guardian --version
 This does **not** run a scan — repo-size-guardian needs a base ref and a
 head ref to diff, and outside of a real `pull_request` event there's
 nothing to auto-detect them from (see
-[Limitations](../README.md#limitations)). Passing `--max-text-size-kb` on
+[Triggers](reference/workflow.md#triggers)). Passing `--max-text-size-kb` on
 its own still exits `2` with a config error, because a ref pair is still
 missing. To dry-run an actual scan locally, see the next section.
 
@@ -105,7 +105,7 @@ Summary:
 ```
 
 It exits with code `1` (a violation at or above the default
-`fail_on: error` — see [Exit codes](../README.md#exit-codes)). The other
+`fail_on: error` — see [Exit codes](reference/output.md#exit-codes)). The other
 two channels went to the files `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT`
 point at instead of the console. Inspect them the same way the runner's
 own later steps would:
