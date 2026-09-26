@@ -37,8 +37,8 @@ One line per violation:
 ERROR  b1c5b3a  assets/demo.mp4  (1.4 MB)  Binary file size 1464.8 KB exceeds 200 KB limit  [rule: threshold.max_binary_size_kb]
 ```
 
-The fields are severity, the commit that added the file, path, size,
-reason, and the policy entry that matched. Entry names are listed in the
+The fields are severity, the commit that added the file, path,
+[size](policy.md#sizes), reason, and the policy entry that matched. Entry names are listed in the
 [evaluation order](policy.md#evaluation-order). In `diff` mode, the commit is
 the head commit.
 

@@ -61,7 +61,9 @@ Deleted files are not checked.
 
 ## Sizes
 
-- Sizes are in KB, where 1 KB = 1024 bytes.
+- Limits are always in KB, where 1 KB = 1024 bytes. For a 1 MB limit, use
+  `1024`.
+- Reports show sizes in B, KB, MB or GB, each 1024 times the one before.
 - "Larger" means strictly greater: a file exactly at a limit passes.
 - A file tracked by Git LFS is checked at the size of its pointer file.
 
