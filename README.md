@@ -20,7 +20,7 @@ they enter your repository.
 on: pull_request
 
 jobs:
-  scan:
+  repo-size-guardian:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -46,8 +46,6 @@ overrides:
   allow_globs: [data/baseline.h5]     # this one file is fine
 ```
 
-- Checks every commit in the pull request, or only the net change with
-  `scan_mode: diff` if you squash-merge
 - Rules by path, extension or file type, each set to warn or block
 - Results in the job summary and as annotations on the pull request
 - Needs no token or extra permissions
