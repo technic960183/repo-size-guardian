@@ -106,7 +106,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--fail-on",
         choices=["error", "any"],
         default="error",
-        help="Minimum severity that causes job failure"
+        help="Which violations fail the job: error (errors only) or any (any violation)"
     )
     parser.add_argument(
         "--scan-mode",

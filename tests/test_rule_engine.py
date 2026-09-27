@@ -152,10 +152,8 @@ class TestMatchesPathGlobstar(unittest.TestCase):
         self.assertTrue(matches_path('a/b/c.txt', ['**']))
 
     def test_bare_globstar_matches_single_and_multi_segment_paths(self):
-        # Regression test: a bare "**" must be excluded from the "**/"
-        # any-depth prefix applied to every other bare pattern -- prefixing
-        # it too (making it "**/**") would stop it matching a single-segment
-        # path like "a".
+        # A bare "**" gets no "**/" any-depth prefix: "**/**" would not
+        # match a single-segment path like "a".
         self.assertTrue(matches_path('a', ['**']))
         self.assertTrue(matches_path('a/b', ['**']))
 
