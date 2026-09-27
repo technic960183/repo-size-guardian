@@ -12,6 +12,44 @@ import tempfile
 import unittest
 from unittest import mock
 
+#: Variables a GitHub Actions runner sets that repo-size-guardian reads.
+GITHUB_RUN_VARIABLES = (
+    'GITHUB_STEP_SUMMARY',
+    'GITHUB_OUTPUT',
+    'GITHUB_EVENT_PATH',
+    'GITHUB_EVENT_NAME',
+    'GITHUB_BASE_REF',
+)
+
+
+def isolate_github_environment(test: unittest.TestCase) -> None:
+    """
+    Remove `GITHUB_RUN_VARIABLES` from the environment for the rest of `test`.
+
+    Most CLI tests drive main.py end to end, which reads these straight from
+    the environment. On a real GitHub Actions runner (including the one
+    running this very test suite in CI) they describe that run:
+
+    - `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT` are the run's own job summary and
+      step output, so an un-isolated test that completes a scan would append
+      a real "Repo Size Guardian" table and a real violations_found=/summary=
+      line to them -- stray, misleading noise on a public repo's Actions run.
+    - `GITHUB_EVENT_PATH`/`GITHUB_EVENT_NAME`/`GITHUB_BASE_REF` describe the
+      run's own trigger, so the code path a test takes through
+      `resolve_refs` (and the coverage it reports) would depend on whether
+      CI was triggered by a push or a pull request.
+
+    Removing them makes every test behave like a local run with no GitHub
+    environment, unless it sets its own values with `mock.patch.dict`. They
+    are restored verbatim on cleanup, whatever they were -- set, unset, or
+    changed mid-test.
+    """
+    env_patcher = mock.patch.dict(os.environ, {}, clear=False)
+    env_patcher.start()
+    test.addCleanup(env_patcher.stop)
+    for name in GITHUB_RUN_VARIABLES:
+        os.environ.pop(name, None)
+
 
 class GitRepoTestHelper:
     """Helper class for creating and managing test git repositories."""
@@ -142,25 +180,7 @@ class GitRepoTestBase(unittest.TestCase):
         os.chdir(self.test_dir)
         self.helper.init_repo()
 
-        # Most of these tests drive main.py's CLI end to end, which
-        # constructs a real ReportConfig() with no explicit paths -- its
-        # defaults read GITHUB_STEP_SUMMARY/GITHUB_OUTPUT straight from the
-        # environment. On a real GitHub Actions runner (including the one
-        # running this very test suite in CI) both are always set, so an
-        # un-isolated test that completes a scan would append a real
-        # "Repo Size Guardian" table to the run's own job summary and a
-        # real violations_found=/summary= line to the step's own output --
-        # stray, misleading noise on a public repo's Actions run. Popping
-        # them here (restored verbatim by mock.patch.dict on teardown, via
-        # addCleanup, whatever they were -- set, unset, or changed mid-test)
-        # makes every such test behave like a local run with no GitHub
-        # environment, which is what these tests actually mean to exercise
-        # unless they opt in with their own explicit temp-file paths.
-        env_patcher = mock.patch.dict(os.environ, {}, clear=False)
-        env_patcher.start()
-        self.addCleanup(env_patcher.stop)
-        os.environ.pop('GITHUB_STEP_SUMMARY', None)
-        os.environ.pop('GITHUB_OUTPUT', None)
+        isolate_github_environment(self)
 
     def tearDown(self):
         """Clean up test environment."""
