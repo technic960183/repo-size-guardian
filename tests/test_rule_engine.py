@@ -1,7 +1,7 @@
 """
 Test suite for rule_engine module.
 
-Covers the glob->regex translator, extension/MIME matching, rule matching
+Covers glob matching, extension/MIME matching, rule matching
 and rule precedence, policy schema validation (including every PolicyError
 path), and the load_policy file-loading contract.
 """
@@ -96,9 +96,14 @@ class TestMatchesPathCharacterClass(unittest.TestCase):
         self.assertTrue(matches_path('file5.txt', ['file[0-9].txt']))
         self.assertFalse(matches_path('fileA.txt', ['file[0-9].txt']))
 
-    def test_unclosed_class_treated_as_literal(self):
-        # "[" with no closing "]" should not raise; treated as a literal '['.
-        self.assertTrue(matches_path('a[b.txt', ['a[b.txt']))
+    def test_unclosed_class_does_not_raise(self):
+        # A "[" with no closing "]" is not valid glob syntax. Whether the
+        # pattern then matches depends on the pathspec version, but it
+        # never raises.
+        matches_path('a[b.txt', ['a[b.txt'])
+
+    def test_escaped_bracket_is_literal(self):
+        self.assertTrue(matches_path('a[b.txt', ['a\\[b.txt']))
 
 
 class TestMatchesPathGlobstar(unittest.TestCase):
@@ -110,8 +115,10 @@ class TestMatchesPathGlobstar(unittest.TestCase):
     def test_dir_globstar_matches_nested_child(self):
         self.assertTrue(matches_path('docs/x/y/a.txt', ['docs/**']))
 
-    def test_dir_globstar_matches_base_itself(self):
-        self.assertTrue(matches_path('docs', ['docs/**']))
+    def test_dir_globstar_does_not_match_file_named_like_base(self):
+        # "docs/**" matches what is inside the folder "docs", not a file
+        # named "docs".
+        self.assertFalse(matches_path('docs', ['docs/**']))
 
     def test_dir_globstar_does_not_match_sibling(self):
         self.assertFalse(matches_path('other/a.txt', ['docs/**']))
@@ -144,24 +151,31 @@ class TestMatchesPathGlobstar(unittest.TestCase):
         self.assertTrue(matches_path('a/x/y/z/b', ['a/**/b']))
 
     def test_middle_globstar_requires_prefix_and_suffix(self):
-        self.assertFalse(matches_path('a/b/c', ['a/**/b']))
+        self.assertFalse(matches_path('a/x/bc', ['a/**/b']))
         self.assertFalse(matches_path('x/b', ['a/**/b']))
+
+    def test_middle_globstar_matches_contents_of_matched_folder(self):
+        # "a/b" is a folder here, so "a/**/b" matches everything in it.
+        self.assertTrue(matches_path('a/b/c', ['a/**/b']))
 
     def test_bare_globstar_matches_anything(self):
         self.assertTrue(matches_path('a.txt', ['**']))
         self.assertTrue(matches_path('a/b/c.txt', ['**']))
 
-    def test_bare_globstar_matches_single_and_multi_segment_paths(self):
-        # A bare "**" gets no "**/" any-depth prefix: "**/**" would not
-        # match a single-segment path like "a".
-        self.assertTrue(matches_path('a', ['**']))
-        self.assertTrue(matches_path('a/b', ['**']))
+    def test_consecutive_globstars_match_anything(self):
+        self.assertTrue(matches_path('a', ['**/**']))
+        self.assertTrue(matches_path('a/b', ['**/**']))
 
-    def test_trailing_slash_pattern_behaves_like_globstar(self):
-        # "docs/" is treated as "docs/**".
-        self.assertTrue(matches_path('docs', ['docs/']))
+    def test_trailing_globstar_slash_matches_folder_contents(self):
+        self.assertTrue(matches_path('a/b', ['**/']))
+        self.assertTrue(matches_path('docs/a/b.txt', ['docs/**/']))
+
+    def test_trailing_slash_pattern_matches_folder_contents(self):
         self.assertTrue(matches_path('docs/a.txt', ['docs/']))
         self.assertTrue(matches_path('docs/x/y.txt', ['docs/']))
+
+    def test_trailing_slash_pattern_does_not_match_file(self):
+        self.assertFalse(matches_path('docs', ['docs/']))
 
 
 class TestMatchesPathAnyDepthMatching(unittest.TestCase):
@@ -189,6 +203,35 @@ class TestMatchesPathAnyDepthMatching(unittest.TestCase):
     def test_trailing_slash_pattern_matches_at_depth(self):
         self.assertTrue(matches_path('build/x', ['build/']))
         self.assertTrue(matches_path('a/build/x/y', ['build/']))
+
+    def test_bare_name_matches_folder_contents(self):
+        self.assertTrue(matches_path('node_modules/x.js', ['node_modules']))
+        self.assertTrue(matches_path('a/node_modules/x/y.js', ['node_modules']))
+
+
+class TestMatchesPathNegationAndComments(unittest.TestCase):
+    """`!pattern` and `#` comments, read as in a `.gitignore` file."""
+
+    def test_negation_excludes_earlier_match(self):
+        patterns = ['*.log', '!keep.log']
+        self.assertTrue(matches_path('a.log', patterns))
+        self.assertFalse(matches_path('keep.log', patterns))
+        self.assertFalse(matches_path('x/keep.log', patterns))
+
+    def test_negation_before_match_has_no_effect(self):
+        self.assertTrue(matches_path('keep.log', ['!keep.log', '*.log']))
+
+    def test_negation_alone_matches_nothing(self):
+        self.assertFalse(matches_path('keep.log', ['!keep.log']))
+
+    def test_escaped_exclamation_mark_is_literal(self):
+        self.assertTrue(matches_path('!a.txt', ['\\!a.txt']))
+
+    def test_comment_matches_nothing(self):
+        self.assertFalse(matches_path('#a.txt', ['#a.txt']))
+
+    def test_escaped_hash_is_literal(self):
+        self.assertTrue(matches_path('#a.txt', ['\\#a.txt']))
 
 
 class TestMatchesPathAnchoringAndEscaping(unittest.TestCase):

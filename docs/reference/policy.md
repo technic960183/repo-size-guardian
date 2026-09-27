@@ -82,9 +82,13 @@ A file's kind comes from its content, not its name.
 
 ## Globs
 
-Globs are gitignore-style. A pattern with a `/` in it, other than a single
-trailing one, is anchored to the repository root. A pattern with no `/`, or
-only a trailing `/`, matches at any depth. Matching is case-sensitive.
+Each list of globs is read like a `.gitignore` file. Matching is
+case-sensitive.
+
+- A pattern with a `/` at the start or in the middle matches from the
+  repository root. Any other pattern matches at any depth.
+- A pattern that matches a folder also matches everything in it.
+- In YAML, put a pattern that starts with `*`, `!` or `#` in quotes.
 
 | Syntax | Matches |
 |---|---|
@@ -93,25 +97,30 @@ only a trailing `/`, matches at any depth. Matching is case-sensitive.
 | `?` | One character, never `/`. |
 | `[abc]`, `[0-9]` | One character from the set or range. |
 | `[!abc]` | One character not in the set. |
-| `dir/` | Same as `dir/**`, matched at any depth. |
-| `/pattern` | Anchors `pattern` to the repository root. |
+| `dir/` | Everything in the folder `dir`, but not a file named `dir`. |
+| `/pattern` | `pattern`, from the repository root only. |
+| `!pattern` | Nothing. Excludes paths that an earlier pattern in the same list matched. |
+| `#comment` | Nothing. The pattern is a comment. |
+| `\#`, `\!`, `\*` | The character itself. |
 
 | Pattern | Path | Match |
 |---|---|:---:|
-| `*.md` | `README.md` | Yes |
-| `*.md` | `docs/a.md` | Yes |
+| `*.md` | `README.md`, `docs/a.md` | Yes |
 | `README.md` | `docs/README.md` | Yes |
 | `/*.md` | `a.md` | Yes |
 | `/*.md` | `docs/a.md` | No |
-| `**/*.md` | `a.md`, `x/y/a.md` | Yes |
-| `docs/**` | `docs`, `docs/a.txt`, `docs/x/y/a.txt` | Yes |
+| `node_modules` | `node_modules/x.js`, `a/node_modules/x.js` | Yes |
+| `build/` | `build/x`, `a/build/x` | Yes |
+| `docs/**` | `docs/a.txt`, `docs/x/y/a.txt` | Yes |
 | `docs/**` | `docsx/a.txt`, `x/docs/a.txt` | No |
 | `foo/*.txt` | `foo/bar.txt` | Yes |
 | `foo/*.txt` | `foo/baz/bar.txt` | No |
 | `a/**/b` | `a/b`, `a/x/b`, `a/x/y/b` | Yes |
-| `a/**/b` | `a/b/c`, `x/a/b` | No |
+| `a/**/b` | `x/a/b` | No |
 | `file[0-9].txt` | `file5.txt` | Yes |
 | `a?b.txt` | `a/b.txt` | No |
+| `"*.log"`, `"!keep.log"` | `a.log` | Yes |
+| `"*.log"`, `"!keep.log"` | `keep.log`, `x/keep.log` | No |
 
 ## Extensions
 

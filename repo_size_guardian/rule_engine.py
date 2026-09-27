@@ -13,12 +13,12 @@ tool.
 """
 
 import os
-import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
+from pathspec import GitIgnoreSpec
 
 from .models import Blob
 
@@ -236,31 +236,27 @@ def load_policy(path: Optional[str]) -> Tuple[Policy, bool]:
 
 # ---------------------------------------------------------------------------
 # Glob matching
-#
-# We deliberately do not use `fnmatch`: its `*` crosses `/`, which is wrong
-# for repo-relative path patterns. Patterns are translated to an anchored
-# regex by hand instead. See `_translate_glob` for the exact semantics.
 # ---------------------------------------------------------------------------
 
 def matches_path(path: str, patterns: Sequence[str]) -> bool:
     """
-    Check whether `path` matches any of `patterns`.
+    Check whether `path` matches `patterns`.
 
-    Matching is gitignore-style: a pattern with a `/` in it (other than a
-    single trailing one) is anchored to the repository root, while a
-    pattern with no `/`, or only a trailing `/`, matches at any depth, as
-    if it were prefixed with `**/`. Matching is case-sensitive. See
-    `_translate_glob` for the supported glob syntax and the exact anchoring
-    rules.
+    `patterns` are read as the lines of a `.gitignore` file, with the same
+    syntax and semantics: a pattern with a `/` at the start or in the middle
+    is anchored to the repository root, any other pattern matches at any
+    depth, a pattern matching a folder also matches everything in it, a
+    later `!pattern` excludes paths an earlier pattern matched, and a
+    pattern starting with `#` is a comment. Matching is case-sensitive.
 
     Args:
         path: Repo-relative POSIX path to test.
         patterns: Glob patterns.
 
     Returns:
-        True if `path` matches at least one pattern.
+        True if `patterns` match `path`.
     """
-    return any(_compile_glob(pattern).match(path) is not None for pattern in patterns)
+    return _compile_patterns(tuple(patterns)).match_file(path)
 
 
 def matches_extension(path: str, extensions: Sequence[str]) -> bool:
@@ -377,142 +373,9 @@ def find_matching_rule(policy: Policy, blob: Blob) -> Optional[Rule]:
 
 
 @lru_cache(maxsize=None)
-def _compile_glob(pattern: str) -> "re.Pattern":
-    """Translate and compile a glob pattern, memoized since policies re-use patterns."""
-    return re.compile(_translate_glob(pattern))
-
-
-def _translate_glob(pattern: str) -> str:
-    """
-    Translate one glob pattern into an anchored regex pattern string.
-
-    Rules:
-    - Anchoring is gitignore-style. A pattern containing a `/` anywhere but
-      a single trailing one is anchored to the repository root (`docs/**`
-      does not match `x/docs/a`; `a/**/b` does not match `x/a/b`). A pattern
-      with no `/`, or only a trailing `/`, matches at any depth, as if it
-      were prefixed with `**/` (`*.md` matches `a.md` and `docs/a.md`;
-      `build/` matches `build/x` and `a/build/x/y`) -- a bare `**` is left
-      alone, since it already matches anything. A leading `/` anchors the
-      pattern to the root and is stripped (`/*.md` matches `a.md` but not
-      `docs/a.md`).
-    - `*` matches any run of characters except `/`.
-    - `?` matches exactly one character except `/`.
-    - `[abc]` / `[!abc]` character classes are passed through to the regex.
-    - `**` as a whole path segment matches zero or more path segments,
-      including the `/` separators (`docs/**` matches `docs`, `docs/a.txt`,
-      and `docs/x/y/a.txt`; `**/*.md` matches `a.md` and `x/y/a.md`).
-    - A pattern ending in `/` is treated as `<pattern>**`.
-    - All other characters are matched literally (regex metacharacters are
-      escaped).
-    """
-    anchored = '/' in pattern.rstrip('/')
-    if pattern.startswith('/'):
-        pattern = pattern[1:]
-    if not anchored and pattern != '**':
-        pattern = '**/' + pattern
-
-    if pattern.endswith('/'):
-        pattern = pattern + '**'
-
-    length = len(pattern)
-    index = 0
-    out: List[str] = []
-    literal_buffer: List[str] = []
-
-    def flush_literal() -> None:
-        if literal_buffer:
-            out.append(re.escape(''.join(literal_buffer)))
-            literal_buffer.clear()
-
-    while index < length:
-        char = pattern[index]
-
-        if char == '*' and pattern[index:index + 2] == '**':
-            prev_is_boundary = index == 0 or pattern[index - 1] == '/'
-            after = index + 2
-            next_is_boundary = after == length or pattern[after] == '/'
-
-            if prev_is_boundary and next_is_boundary:
-                flush_literal()
-                if index == 0 and after == length:
-                    # The whole pattern is "**": matches anything.
-                    out.append('.*')
-                    index = after
-                elif index == 0:
-                    # "**/" at the start: zero or more leading segments.
-                    out.append('(?:.*/)?')
-                    index = after + 1  # also consume the following '/'
-                elif after == length:
-                    # "/**" at the end: zero or more trailing segments,
-                    # including matching the base path with none at all.
-                    if out and out[-1] == '/':
-                        out.pop()
-                    out.append('(?:/.*)?')
-                    index = after
-                else:
-                    # "/**/"  in the middle: zero or more whole segments.
-                    out.append('(?:.*/)?')
-                    index = after + 1  # also consume the following '/'
-                continue
-            # Not a whole path segment on its own (e.g. "a**b"): fall
-            # through and treat this '*' like a single-character wildcard;
-            # the next iteration handles the following '*' the same way.
-
-        if char == '*':
-            flush_literal()
-            out.append('[^/]*')
-            index += 1
-        elif char == '?':
-            flush_literal()
-            out.append('[^/]')
-            index += 1
-        elif char == '[':
-            end = _find_char_class_end(pattern, index)
-            if end is None:
-                # No closing ']': treat '[' as a literal character.
-                literal_buffer.append(char)
-                index += 1
-            else:
-                flush_literal()
-                class_body = pattern[index + 1:end]
-                if class_body.startswith('!'):
-                    class_body = '^' + class_body[1:]
-                class_body = class_body.replace('\\', '\\\\')
-                out.append('[' + class_body + ']')
-                index = end + 1
-        elif char == '/':
-            flush_literal()
-            out.append('/')
-            index += 1
-        else:
-            literal_buffer.append(char)
-            index += 1
-
-    flush_literal()
-    return '^' + ''.join(out) + '$'
-
-
-def _find_char_class_end(pattern: str, start: int) -> Optional[int]:
-    """
-    Find the index of the `]` closing the character class opened at `start`.
-
-    Handles the glob convention that a `]` appearing immediately (or
-    immediately after a leading `!`) is a literal member of the class rather
-    than its closing bracket.
-
-    Returns:
-        The index of the closing `]`, or None if the class is never closed.
-    """
-    length = len(pattern)
-    cursor = start + 1
-    if cursor < length and pattern[cursor] == '!':
-        cursor += 1
-    if cursor < length and pattern[cursor] == ']':
-        cursor += 1
-    while cursor < length and pattern[cursor] != ']':
-        cursor += 1
-    return cursor if cursor < length else None
+def _compile_patterns(patterns: Tuple[str, ...]) -> GitIgnoreSpec:
+    """Compile a list of glob patterns, memoized since policies re-use them."""
+    return GitIgnoreSpec.from_lines(patterns)
 
 
 def _extension_of(path: str) -> Optional[str]:
