@@ -22,7 +22,7 @@ import unittest
 from unittest import mock
 
 from repo_size_guardian import main as main_module
-from tests.test_base import GitRepoTestBase
+from tests.test_base import GitRepoTestBase, isolate_github_environment
 
 
 def run_cli(argv):
@@ -203,6 +203,7 @@ class TestShallowClonePreflight(unittest.TestCase):
     """A shallow clone fails fast with exit code 2 and an actionable message."""
 
     def setUp(self):
+        isolate_github_environment(self)
         self.original_cwd = os.getcwd()
         self.source_dir = tempfile.mkdtemp()
         self.shallow_dir = tempfile.mkdtemp()
@@ -350,6 +351,20 @@ class TestResolveRefs(unittest.TestCase):
         finally:
             os.unlink(event_path)
 
+    def test_event_without_pull_request_falls_through(self):
+        event = {'ref': 'refs/heads/main'}
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as handle:
+            json.dump(event, handle)
+            event_path = handle.name
+        try:
+            env = {'GITHUB_EVENT_PATH': event_path, 'GITHUB_BASE_REF': 'develop'}
+            with mock.patch.dict(os.environ, env, clear=True):
+                base, head = main_module.resolve_refs(self._args())
+            self.assertEqual(base, 'origin/develop')
+            self.assertEqual(head, 'HEAD')
+        finally:
+            os.unlink(event_path)
+
     def test_missing_event_path_falls_through_to_origin_base_ref(self):
         with mock.patch.dict(os.environ, {'GITHUB_BASE_REF': 'develop'}, clear=True):
             base, head = main_module.resolve_refs(self._args())
@@ -394,16 +409,7 @@ class TestNonPullRequestEventCli(GitRepoTestBase):
     def test_push_event_exits_two_with_actionable_message(self):
         self.helper.commit_file('README.md', 'hello', 'Base commit')
 
-        env = dict(os.environ)
-        # A real push-triggered run would not have these set; strip them so
-        # the CLI actually falls through to the new error path instead of
-        # accidentally resolving a ref from the *test process's* own
-        # environment.
-        env.pop('GITHUB_EVENT_PATH', None)
-        env.pop('GITHUB_BASE_REF', None)
-        env['GITHUB_EVENT_NAME'] = 'push'
-
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}):
             exit_code, _stdout, stderr = run_cli(['--max-text-size-kb', '1000'])
 
         self.assertEqual(exit_code, 2)
