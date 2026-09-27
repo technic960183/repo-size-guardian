@@ -160,7 +160,7 @@ class TestScanStepShellBehavior(unittest.TestCase):
         self.assertEqual(argv, ['-m', 'repo_size_guardian'])
 
     def test_populated_inputs_become_flags(self):
-        argv = self.run_script(policy_path='.github/p.yml', fail_on='warn',
+        argv = self.run_script(policy_path='.github/p.yml', fail_on='any',
                                scan_mode='diff', dedupe_blobs='false',
                                annotate_pr='false', max_annotations='0',
                                max_text_size_kb='500', max_binary_size_kb='100',
@@ -169,7 +169,7 @@ class TestScanStepShellBehavior(unittest.TestCase):
         flags = argv[2:]
         self.assertEqual(flags, [
             '--policy-path', '.github/p.yml',
-            '--fail-on', 'warn',
+            '--fail-on', 'any',
             '--scan-mode', 'diff',
             '--dedupe-blobs', 'false',
             '--annotate-pr', 'false',

@@ -11,7 +11,7 @@ All inputs are optional. An input set to an empty string uses its default.
 | `max_text_size_kb` | no limit | Size limit for text files, in KB. The policy's `thresholds.max_text_size_kb` takes precedence. |
 | `max_binary_size_kb` | no limit | Size limit for binary files, in KB. The policy's `thresholds.max_binary_size_kb` takes precedence. |
 | `policy_path` | `.github/repo-size-guardian.yml` | Path to the [policy file](policy.md). If no file exists there, no policy is applied. |
-| `fail_on` | `error` | Lowest severity that fails the job. `error`: only errors fail it. `warn`: any violation fails it. |
+| `fail_on` | `error` | Which violations fail the job. `error`: only errors fail it. `any`: any violation fails it. |
 | `scan_mode` | `history` | `history` or `diff`. See [Scan modes](#scan-modes). |
 | `dedupe_blobs` | `true` | Report each file content once per path, at the earliest commit that added it. `false` reports every commit that adds it. |
 | `annotate_pr` | `true` | Add an [annotation](output.md#annotations) for each violation. |

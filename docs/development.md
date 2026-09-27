@@ -104,8 +104,9 @@ Summary:
 ::error file=big_notes.txt::Text file size 2.0 KB exceeds 1 KB limit
 ```
 
-It exits with code `1` (a violation at or above the default
-`fail_on: error` — see [Exit codes](reference/output.md#exit-codes)). The other
+It exits with code `1` (an error-severity violation, which fails the job
+under the default `fail_on: error` — see
+[Exit codes](reference/output.md#exit-codes)). The other
 two channels went to the files `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT`
 point at instead of the console. Inspect them the same way the runner's
 own later steps would:

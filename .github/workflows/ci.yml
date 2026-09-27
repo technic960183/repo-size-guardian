@@ -390,18 +390,18 @@ jobs:
           exit 1
         fi
 
-    # --- Scenario 3: fail_on=warn vs fail_on=error, same violation --------
+    # --- Scenario 3: fail_on=any vs fail_on=error, same violation ---------
     - name: "Scenario 3: check out the warn-rule fixture"
       run: git checkout fixture/warn-rule
 
-    - name: "Scenario 3a: fail_on=warn (expect exit 1 on a warn-severity violation)"
+    - name: "Scenario 3a: fail_on=any (expect exit 1 on a warn-severity violation)"
       id: scan_warn_strict
       continue-on-error: true
       uses: ./.rsg-action
       with:
         base_ref: fixture/base
         head_ref: fixture/warn-rule
-        fail_on: warn
+        fail_on: any
 
     - name: "Scenario 3a: assert exit 1"
       env:
@@ -411,7 +411,7 @@ jobs:
         set -euo pipefail
         echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
         if [ "$OUTCOME" != "failure" ]; then
-          echo "::error::expected fail_on=warn to fail on a warn-severity violation, but outcome was '$OUTCOME'"
+          echo "::error::expected fail_on=any to fail on a warn-severity violation, but outcome was '$OUTCOME'"
           exit 1
         fi
         if [ "$VIOLATIONS" != "1" ]; then

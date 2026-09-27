@@ -106,21 +106,21 @@ def has_failing_violations(violations: Sequence[Violation], fail_on: str) -> boo
 
     Args:
         violations: The violations produced by `evaluate_blobs`.
-        fail_on: The minimum severity that causes failure, `'warn'` or
-            `'error'`. With `'warn'`, any violation at all fails the job.
-            With `'error'`, only `'error'`-severity violations fail it.
+        fail_on: `'error'` or `'any'`. With `'error'`, only `'error'`-
+            severity violations fail the job. With `'any'`, any violation
+            at all fails it.
 
     Returns:
         True if the job should fail.
 
     Raises:
-        ValueError: If `fail_on` is not `'warn'` or `'error'`.
+        ValueError: If `fail_on` is not `'error'` or `'any'`.
     """
-    if fail_on == 'warn':
+    if fail_on == 'any':
         return len(violations) > 0
     if fail_on == 'error':
         return any(v.severity == 'error' for v in violations)
-    raise ValueError(f"Invalid fail_on value: {fail_on!r}; expected 'warn' or 'error'")
+    raise ValueError(f"Invalid fail_on value: {fail_on!r}; expected 'error' or 'any'")
 
 
 def _evaluate_single_blob(blob: Blob, policy: Policy,

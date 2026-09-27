@@ -34,7 +34,7 @@ _FALSE_STRINGS = frozenset({'false', '0', 'no'})
 
 #: Exit code for a clean run (no failing violations).
 EXIT_OK = 0
-#: Exit code for a run with violations at/above the configured fail_on severity.
+#: Exit code for a run with violations that fail the job under fail_on.
 EXIT_VIOLATIONS = 1
 #: Exit code for a configuration/usage error (bad policy, shallow clone,
 #: unresolvable ref, invalid input).
@@ -104,7 +104,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--fail-on",
-        choices=["warn", "error"],
+        choices=["error", "any"],
         default="error",
         help="Minimum severity that causes job failure"
     )

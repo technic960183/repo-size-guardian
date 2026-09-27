@@ -14,7 +14,7 @@ inputs:
     required: false
     default: '.github/repo-size-guardian.yml'
   fail_on:
-    description: 'Minimum severity that causes job failure (warn|error)'
+    description: 'Minimum severity that causes job failure (error|any)'
     required: false
     default: 'error'
   scan_mode:

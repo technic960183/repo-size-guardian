@@ -77,7 +77,7 @@ class TestCleanAndViolatingPR(GitRepoTestBase):
 
 
 class TestFailOnSeverity(GitRepoTestBase):
-    """fail_on=warn vs fail_on=error changes the exit code for a warn-only violation."""
+    """fail_on=any vs fail_on=error changes the exit code for a warn-only violation."""
 
     def setUp(self):
         super().setUp()
@@ -100,10 +100,10 @@ class TestFailOnSeverity(GitRepoTestBase):
         self.assertEqual(exit_code, 0)
         self.assertIn('WARN', stdout)
 
-    def test_fail_on_warn_fails_on_warn_violation(self):
+    def test_fail_on_any_fails_on_warn_violation(self):
         exit_code, stdout, _stderr = run_cli([
             '--base-ref', 'main', '--head-ref', 'feature',
-            '--policy-path', 'policy.yml', '--fail-on', 'warn',
+            '--policy-path', 'policy.yml', '--fail-on', 'any',
         ])
         self.assertEqual(exit_code, 1)
         self.assertIn('WARN', stdout)

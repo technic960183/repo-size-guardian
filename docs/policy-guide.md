@@ -68,7 +68,7 @@ rules:
 - `size_over_kb` reports only files larger than this. Without it, every
   matching file is reported.
 - `action: warn` reports the file without failing the check, unless the
-  workflow sets `fail_on: warn`.
+  workflow sets `fail_on: any`.
 
 Rules are checked in order, and the first rule that matches a file decides
 it. A 1000 KB CSV under `data/` passes here, even though it's over

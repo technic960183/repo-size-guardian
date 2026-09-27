@@ -65,8 +65,8 @@ no line number.
 
 | Code | Meaning |
 |---|---|
-| `0` | No violation at or above the `fail_on` severity. |
-| `1` | At least one violation at or above the `fail_on` severity. |
+| `0` | No violation that `fail_on` fails the job on. |
+| `1` | At least one violation that `fail_on` fails the job on. |
 | `2` | The scan didn't finish: a [configuration error](#error-messages) or an [internal error](#internal-errors). |
 
 ## Error messages
