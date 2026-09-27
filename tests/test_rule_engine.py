@@ -50,7 +50,8 @@ class TestMatchesPathStar(unittest.TestCase):
         self.assertTrue(matches_path('a.md', ['*.md']))
 
     def test_star_does_not_cross_slash(self):
-        self.assertFalse(matches_path('docs/a.md', ['*.md']))
+        self.assertFalse(matches_path('docs/a.md', ['/*.md']))
+        self.assertTrue(matches_path('a.md', ['/*.md']))
 
     def test_star_matches_empty_run(self):
         self.assertTrue(matches_path('.md', ['*.md']))
@@ -116,6 +117,14 @@ class TestMatchesPathGlobstar(unittest.TestCase):
         self.assertFalse(matches_path('other/a.txt', ['docs/**']))
         self.assertFalse(matches_path('docsx/a.txt', ['docs/**']))
 
+    def test_dir_globstar_stays_anchored_to_root(self):
+        # A pattern with a "/" is anchored: "docs/**" is not the same as
+        # "**/docs/**".
+        self.assertFalse(matches_path('x/docs/a.txt', ['docs/**']))
+
+    def test_middle_globstar_stays_anchored_to_root(self):
+        self.assertFalse(matches_path('x/a/b', ['a/**/b']))
+
     def test_leading_globstar_matches_top_level_file(self):
         self.assertTrue(matches_path('a.md', ['**/*.md']))
 
@@ -142,6 +151,14 @@ class TestMatchesPathGlobstar(unittest.TestCase):
         self.assertTrue(matches_path('a.txt', ['**']))
         self.assertTrue(matches_path('a/b/c.txt', ['**']))
 
+    def test_bare_globstar_matches_single_and_multi_segment_paths(self):
+        # Regression test: a bare "**" must be excluded from the "**/"
+        # any-depth prefix applied to every other bare pattern -- prefixing
+        # it too (making it "**/**") would stop it matching a single-segment
+        # path like "a".
+        self.assertTrue(matches_path('a', ['**']))
+        self.assertTrue(matches_path('a/b', ['**']))
+
     def test_trailing_slash_pattern_behaves_like_globstar(self):
         # "docs/" is treated as "docs/**".
         self.assertTrue(matches_path('docs', ['docs/']))
@@ -149,12 +166,39 @@ class TestMatchesPathGlobstar(unittest.TestCase):
         self.assertTrue(matches_path('docs/x/y.txt', ['docs/']))
 
 
-class TestMatchesPathAnchoringAndEscaping(unittest.TestCase):
-    """Full-path anchoring and literal-character escaping."""
+class TestMatchesPathAnyDepthMatching(unittest.TestCase):
+    """
+    A pattern with no `/`, or only a trailing `/`, matches at any depth
+    (gitignore-style), and a leading `/` anchors it back to the root.
+    """
 
-    def test_no_implicit_basename_matching(self):
-        self.assertFalse(matches_path('docs/a.md', ['*.md']))
+    def test_bare_star_pattern_matches_at_depth(self):
         self.assertTrue(matches_path('a.md', ['*.md']))
+        self.assertTrue(matches_path('docs/x/a.md', ['*.md']))
+
+    def test_bare_exact_name_matches_at_depth(self):
+        self.assertTrue(matches_path('README.md', ['README.md']))
+        self.assertTrue(matches_path('docs/README.md', ['README.md']))
+
+    def test_leading_slash_anchors_to_root(self):
+        self.assertTrue(matches_path('a.md', ['/*.md']))
+        self.assertFalse(matches_path('docs/a.md', ['/*.md']))
+
+    def test_leading_slash_anchors_exact_name_to_root(self):
+        self.assertTrue(matches_path('README.md', ['/README.md']))
+        self.assertFalse(matches_path('docs/README.md', ['/README.md']))
+
+    def test_trailing_slash_pattern_matches_at_depth(self):
+        self.assertTrue(matches_path('build/x', ['build/']))
+        self.assertTrue(matches_path('a/build/x/y', ['build/']))
+
+
+class TestMatchesPathAnchoringAndEscaping(unittest.TestCase):
+    """Root-anchoring for patterns containing a `/`, and literal-character escaping."""
+
+    def test_pattern_with_slash_is_not_matched_at_depth(self):
+        self.assertFalse(matches_path('x/docs/a.md', ['docs/a.md']))
+        self.assertTrue(matches_path('docs/a.md', ['docs/a.md']))
 
     def test_literal_dot_is_escaped(self):
         # "a.txt" must not match "axtxt": '.' in the pattern is literal.

@@ -82,8 +82,9 @@ A file's kind comes from its content, not its name.
 
 ## Globs
 
-Globs match the whole path from the repository root. Matching is
-case-sensitive.
+Globs are gitignore-style. A pattern with a `/` in it, other than a single
+trailing one, is anchored to the repository root. A pattern with no `/`, or
+only a trailing `/`, matches at any depth. Matching is case-sensitive.
 
 | Syntax | Matches |
 |---|---|
@@ -92,19 +93,23 @@ case-sensitive.
 | `?` | One character, never `/`. |
 | `[abc]`, `[0-9]` | One character from the set or range. |
 | `[!abc]` | One character not in the set. |
-| `dir/` | Same as `dir/**`. |
+| `dir/` | Same as `dir/**`, matched at any depth. |
+| `/pattern` | Anchors `pattern` to the repository root. |
 
 | Pattern | Path | Match |
 |---|---|:---:|
 | `*.md` | `README.md` | Yes |
-| `*.md` | `docs/a.md` | No |
+| `*.md` | `docs/a.md` | Yes |
+| `README.md` | `docs/README.md` | Yes |
+| `/*.md` | `a.md` | Yes |
+| `/*.md` | `docs/a.md` | No |
 | `**/*.md` | `a.md`, `x/y/a.md` | Yes |
 | `docs/**` | `docs`, `docs/a.txt`, `docs/x/y/a.txt` | Yes |
-| `docs/**` | `docsx/a.txt` | No |
+| `docs/**` | `docsx/a.txt`, `x/docs/a.txt` | No |
 | `foo/*.txt` | `foo/bar.txt` | Yes |
 | `foo/*.txt` | `foo/baz/bar.txt` | No |
 | `a/**/b` | `a/b`, `a/x/b`, `a/x/y/b` | Yes |
-| `a/**/b` | `a/b/c` | No |
+| `a/**/b` | `a/b/c`, `x/a/b` | No |
 | `file[0-9].txt` | `file5.txt` | Yes |
 | `a?b.txt` | `a/b.txt` | No |
 

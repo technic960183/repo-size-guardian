@@ -246,9 +246,12 @@ def matches_path(path: str, patterns: Sequence[str]) -> bool:
     """
     Check whether `path` matches any of `patterns`.
 
-    Patterns are matched against the full repo-relative POSIX path, anchored
-    at both ends (no implicit basename matching). Matching is case-sensitive.
-    See `_translate_glob` for the supported glob syntax.
+    Matching is gitignore-style: a pattern with a `/` in it (other than a
+    single trailing one) is anchored to the repository root, while a
+    pattern with no `/`, or only a trailing `/`, matches at any depth, as
+    if it were prefixed with `**/`. Matching is case-sensitive. See
+    `_translate_glob` for the supported glob syntax and the exact anchoring
+    rules.
 
     Args:
         path: Repo-relative POSIX path to test.
@@ -384,6 +387,15 @@ def _translate_glob(pattern: str) -> str:
     Translate one glob pattern into an anchored regex pattern string.
 
     Rules:
+    - Anchoring is gitignore-style. A pattern containing a `/` anywhere but
+      a single trailing one is anchored to the repository root (`docs/**`
+      does not match `x/docs/a`; `a/**/b` does not match `x/a/b`). A pattern
+      with no `/`, or only a trailing `/`, matches at any depth, as if it
+      were prefixed with `**/` (`*.md` matches `a.md` and `docs/a.md`;
+      `build/` matches `build/x` and `a/build/x/y`) -- a bare `**` is left
+      alone, since it already matches anything. A leading `/` anchors the
+      pattern to the root and is stripped (`/*.md` matches `a.md` but not
+      `docs/a.md`).
     - `*` matches any run of characters except `/`.
     - `?` matches exactly one character except `/`.
     - `[abc]` / `[!abc]` character classes are passed through to the regex.
@@ -394,6 +406,12 @@ def _translate_glob(pattern: str) -> str:
     - All other characters are matched literally (regex metacharacters are
       escaped).
     """
+    anchored = '/' in pattern.rstrip('/')
+    if pattern.startswith('/'):
+        pattern = pattern[1:]
+    if not anchored and pattern != '**':
+        pattern = '**/' + pattern
+
     if pattern.endswith('/'):
         pattern = pattern + '**'
 
