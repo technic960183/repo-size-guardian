@@ -38,6 +38,7 @@ from .reporting import (
 )
 from .rule_engine import Policy, PolicyError, Rule, load_policy
 from .size_resolver import augment_blob_objects_with_sizes
+from .transience import augment_blob_objects_with_transience
 from .type_detector import augment_blob_objects_with_types
 
 #: Accepted spellings for CLI/action boolean inputs, which arrive as strings
@@ -763,6 +764,42 @@ def _warn_if_mime_matching_unavailable(rules: List[Rule]) -> None:
     )
 
 
+def _warn_if_transient_matching_unavailable(rules: List[Rule], scan_mode: str) -> None:
+    """
+    Warn if the rules match on transient/transient_version but scan_mode is
+    'diff', where neither condition can ever hold.
+
+    `scan_mode: 'diff'` only ever sees the net merge-base..head diff, which
+    collapses a file added and later removed or replaced back out of
+    existence (see `_enumerate_diff_blobs`) -- exactly the file versions
+    `transient`/`transient_version` exist to catch. Every blob's own
+    `is_transient`/`is_transient_version` is unconditionally `False` in this
+    mode (see `transience.py`), so a rule matching on either key silently
+    matches nothing, which looks exactly like a clean scan. Only warn when a
+    rule actually relies on one of these keys, to keep the log quiet for
+    everyone else.
+
+    Args:
+        rules: The rules that will actually be evaluated.
+        scan_mode: 'history' or 'diff'.
+    """
+    if scan_mode != 'diff':
+        return
+    uses_transient = any(
+        rule.match_transient is not None or rule.match_transient_version is not None
+        for rule in rules)
+    if not uses_transient:
+        return
+
+    emit_warning(
+        "repo-size-guardian: your policy matches on transient or "
+        "transient_version, but scan_mode is 'diff', which only sees the "
+        "final diff, so these conditions never match. Use scan_mode: "
+        "history.",
+        stream=sys.stdout,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -875,9 +912,11 @@ def run(args: argparse.Namespace) -> int:
 
     augment_blob_objects_with_sizes(blobs)
     augment_blob_objects_with_types(blobs)
+    augment_blob_objects_with_transience(blobs, args.scan_mode, merge_base, head_sha)
 
     _warn_if_nothing_enforced(rules, used_policy_file, args.policy_path)
     _warn_if_mime_matching_unavailable(rules)
+    _warn_if_transient_matching_unavailable(rules, args.scan_mode)
 
     eval_config = EvaluationConfig(dedupe_blobs=dedupe_blobs)
     # stream=sys.stdout is passed explicitly for the same reason as the

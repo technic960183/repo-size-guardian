@@ -2,7 +2,7 @@
 Git utilities for repository analysis.
 
 Provides low-level Git operations for accessing blob content, metadata,
-commit ranges, and file changes.
+commit ranges, file changes, and tree listings.
 """
 
 import os
@@ -429,6 +429,52 @@ def get_diff_files(commit_sha: str) -> List[Dict[str, str]]:
         out = result.stdout
 
     return parse_raw_diff_z(out)
+
+
+def list_tree_blobs(commit_sha: str) -> Dict[str, str]:
+    """
+    List every blob in a commit's tree, recursively.
+
+    Uses `git ls-tree -r -z`, whose output is one NUL-terminated record per
+    entry, `"<mode> <type> <sha>\\t<path>"`: `-z` prints paths literally, the
+    same reason `_DIFF_TREE_FLAGS` carries it for `diff-tree` (without it, a
+    path holding non-ASCII bytes or special characters is C-quoted, and
+    trailing whitespace in the final path is indistinguishable from the
+    trailing newline of the output).
+
+    Submodule (gitlink) entries, recognisable by their `160000` mode, are
+    skipped: their SHA is a commit in the submodule's own repository, not a
+    blob in this one, and a tree lists at most one entry per path, so this
+    is the only place a "blob or not" decision needs to be made per entry.
+
+    Args:
+        commit_sha: Commit to list the tree of.
+
+    Returns:
+        A dict mapping each path in the tree to its blob SHA.
+
+    Raises:
+        subprocess.CalledProcessError: If git command fails.
+    """
+    result = subprocess.run(
+        ['git', 'ls-tree', '-r', '-z', commit_sha],
+        capture_output=True,
+        check=True
+    )
+
+    tree: Dict[str, str] = {}
+    fields = [os.fsdecode(field) for field in result.stdout.split(b'\0')]
+    if fields and fields[-1] == '':
+        fields.pop()
+
+    for record in fields:
+        meta, _sep, path = record.partition('\t')
+        mode, _obj_type, blob_sha = meta.split(' ')
+        if mode == _GITLINK_MODE:
+            continue
+        tree[path] = blob_sha
+
+    return tree
 
 
 def get_blob_sha_at_commit(commit_sha: str, path: str) -> str:

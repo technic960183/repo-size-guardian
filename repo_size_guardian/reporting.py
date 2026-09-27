@@ -41,6 +41,16 @@ _HISTORY_NOTE = (
     "and force-push)."
 )
 
+#: Appended to a report entry's reason when its file version is
+#: `transient_version` (see `models.Blob.is_transient_version`): it exists
+#: at neither the merge-base nor the head commit, so a reader who only
+#: checked out the PR's final state would never find it and might otherwise
+#: assume the report is stale.
+_TRANSIENT_VERSION_NOTE = (
+    "This version of {0} was removed or replaced later in this pull "
+    "request, but it stays in the history."
+)
+
 
 @dataclass
 class ReportConfig:
@@ -169,6 +179,30 @@ def remediation_hint(violation: Violation) -> str:
     return "{0} {1}".format(lead, _HISTORY_NOTE)
 
 
+def _entry_reason(entry: ReportEntry) -> str:
+    """
+    Build the reason text shown for one report entry: its hits' messages,
+    joined by "; ", the same text used for the console line, the job
+    summary's Reason column, and the annotation message alike.
+
+    When the entry's file version is `transient_version` (see
+    `models.Blob.is_transient_version`), a note is appended explaining that
+    it was removed or replaced later in the pull request and so exists at
+    neither the merge-base nor the head commit, but still shows up here
+    because it stays reachable from the branch's history.
+
+    Args:
+        entry: The report entry.
+
+    Returns:
+        The reason text.
+    """
+    reason = "; ".join(violation.message for violation in entry.violations)
+    if entry.blob.is_transient_version:
+        reason += " " + _TRANSIENT_VERSION_NOTE.format(entry.path)
+    return reason
+
+
 def _entry_rule_label(entry: ReportEntry) -> str:
     """`"rule: x"`, or `"rules: x, y"` when the entry collected several hits."""
     rule_names = [violation.rule_name for violation in entry.violations]
@@ -201,7 +235,7 @@ def format_console_report(entries: Sequence[ReportEntry], stats: ScanStats) -> s
     ]
 
     for entry in entries:
-        message = "; ".join(violation.message for violation in entry.violations)
+        message = _entry_reason(entry)
         lines.append(
             "  {severity:<5}  {sha}  {path}  ({size})  {message}  [{rule_label}]".format(
                 severity=entry.severity.upper(),
@@ -275,7 +309,7 @@ def format_step_summary(entries: Sequence[ReportEntry], stats: ScanStats) -> str
 
     shown = entries[:_STEP_SUMMARY_MAX_ROWS]
     for entry in shown:
-        reason = "; ".join(violation.message for violation in entry.violations)
+        reason = _entry_reason(entry)
         rules = ", ".join(violation.rule_name for violation in entry.violations)
         lines.append(
             "| {severity} | `{path}` | {size} | {reason} | `{rules}` |".format(
@@ -375,8 +409,7 @@ def emit_annotations(entries: Sequence[ReportEntry], config: ReportConfig,
     for entry in emitted:
         command = _SEVERITY_TO_ANNOTATION_COMMAND.get(entry.severity, 'error')
         file_value = _escape_annotation_property(entry.path)
-        message = _escape_annotation_message(
-            "; ".join(violation.message for violation in entry.violations))
+        message = _escape_annotation_message(_entry_reason(entry))
         stream.write("::{0} file={1}::{2}\n".format(command, file_value, message))
 
     if truncate:

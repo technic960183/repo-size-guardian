@@ -222,6 +222,21 @@ jobs:
         git add .github/repo-size-guardian.yml placeholder.txt
         git commit -q -m "fixture: malformed policy file"
 
+        # Scenario 6 -- a transient file: added in one commit, deleted again
+        # in a later commit, both within the same PR. A merge-base..head
+        # diff collapses this away entirely, so only scan_mode: history (the
+        # default) ever sees it -- this is what `match.transient` exists to
+        # catch. Expected: exit 1, violation_count == 1,
+        # violating_file_count == 1.
+        git checkout -b fixture/transient-file fixture/base
+        mkdir -p .github
+        cp "${FIXTURES}/policies/transient-rule.yml" .github/repo-size-guardian.yml
+        echo "temporary content" > scratch.txt
+        git add .github/repo-size-guardian.yml scratch.txt
+        git commit -q -m "fixture: add policy and a file"
+        git rm -q scratch.txt
+        git commit -q -m "fixture: delete the file again"
+
     # Unpacked only now, AFTER the `git clean -fdx` above, so the wipe can
     # never reach it. It stays untracked on every fixture branch, which is
     # harmless: the scan walks commits in the `fixture/base..fixture/*`
@@ -550,6 +565,36 @@ jobs:
           --base-ref fixture/base --head-ref fixture/malformed-policy --fail-on error || rc=$?
         if [ "$rc" != "2" ]; then
           echo "::error::expected exit 2 (EXIT_CONFIG_ERROR) for a malformed policy file, got exit $rc"
+          exit 1
+        fi
+
+    # --- Scenario 6: transient file (added, then deleted, within the PR) --
+    - name: "Scenario 6: check out the transient-file fixture"
+      run: git checkout fixture/transient-file
+
+    - name: "Scenario 6: transient: true rule (expect exit 1)"
+      id: scan_transient
+      continue-on-error: true
+      uses: ./.rsg-action
+      with:
+        base_ref: fixture/base
+        head_ref: fixture/transient-file
+        fail_on: error
+
+    - name: "Scenario 6: assert the scan failed with exactly 1 violation in 1 file"
+      env:
+        OUTCOME: ${{ steps.scan_transient.outcome }}
+        VIOLATIONS: ${{ steps.scan_transient.outputs.violation_count }}
+        FILES: ${{ steps.scan_transient.outputs.violating_file_count }}
+      run: |
+        set -euo pipefail
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS' violating_file_count='$FILES'"
+        if [ "$OUTCOME" != "failure" ]; then
+          echo "::error::expected the transient-file scenario to fail (scratch.txt was added and removed again within the PR), got outcome '$OUTCOME'"
+          exit 1
+        fi
+        if [ "$VIOLATIONS" != "1" ] || [ "$FILES" != "1" ]; then
+          echo "::error::expected exactly 1 violation in 1 file (scratch.txt via the transient rule), got violation_count='$VIOLATIONS' violating_file_count='$FILES'"
           exit 1
         fi
 

@@ -43,10 +43,10 @@ def make_violation(rule_name='threshold', message='File exceeds size threshold',
 
 
 def make_entry(path='big.bin', blob_sha='a' * 40, commit_sha='c' * 40,
-               status='A', size_bytes=1024, violations=None):
+               status='A', size_bytes=1024, violations=None, is_transient_version=None):
     """Build a Blob + ReportEntry pair for tests."""
     blob = Blob(path=path, blob_sha=blob_sha, commit_sha=commit_sha,
-                status=status, size_bytes=size_bytes)
+                status=status, size_bytes=size_bytes, is_transient_version=is_transient_version)
     return ReportEntry(blob=blob, violations=violations or [make_violation()])
 
 
@@ -245,6 +245,65 @@ class TestFormatStepSummary(unittest.TestCase):
         table_rows = [ln for ln in text.splitlines() if ln.startswith('| ERROR')]
         self.assertEqual(len(table_rows), 1)
         self.assertIn('line one line two line three', table_rows[0])
+
+
+class TestTransientVersionNote(unittest.TestCase):
+    """
+    A `transient_version` entry's reason gets the "removed or replaced
+    later" note, shared by the console report, the job summary's Reason
+    column, and the annotation message alike (see `_entry_reason`).
+    """
+
+    def test_console_report_includes_note(self):
+        entry = make_entry(path='scratch.bin', is_transient_version=True)
+        text = format_console_report([entry], ScanStats())
+        self.assertIn(
+            'This version of scratch.bin was removed or replaced later in '
+            'this pull request, but it stays in the history.', text)
+
+    def test_console_report_omits_note_when_not_transient_version(self):
+        entry = make_entry(is_transient_version=False)
+        text = format_console_report([entry], ScanStats())
+        self.assertNotIn('removed or replaced later', text)
+
+    def test_console_report_omits_note_when_undetermined(self):
+        entry = make_entry(is_transient_version=None)
+        text = format_console_report([entry], ScanStats())
+        self.assertNotIn('removed or replaced later', text)
+
+    def test_job_summary_reason_column_includes_note(self):
+        entry = make_entry(path='scratch.bin', is_transient_version=True)
+        text = format_step_summary([entry], ScanStats())
+        self.assertIn(
+            'This version of scratch.bin was removed or replaced later in '
+            'this pull request, but it stays in the history.', text)
+
+    def test_job_summary_omits_note_when_not_transient_version(self):
+        entry = make_entry(is_transient_version=False)
+        text = format_step_summary([entry], ScanStats())
+        self.assertNotIn('removed or replaced later', text)
+
+    def test_annotation_message_includes_note(self):
+        entry = make_entry(path='scratch.bin', is_transient_version=True)
+        stream = io.StringIO()
+        emit_annotations([entry], ReportConfig(), stream=stream)
+        self.assertIn(
+            'This version of scratch.bin was removed or replaced later in '
+            'this pull request, but it stays in the history.', stream.getvalue())
+
+    def test_annotation_message_omits_note_when_not_transient_version(self):
+        entry = make_entry(is_transient_version=False)
+        stream = io.StringIO()
+        emit_annotations([entry], ReportConfig(), stream=stream)
+        self.assertNotIn('removed or replaced later', stream.getvalue())
+
+    def test_note_appended_after_the_joined_hit_messages(self):
+        entry = make_entry(
+            is_transient_version=True,
+            violations=[make_violation(message='Matched rule \'r\'')])
+        text = format_console_report([entry], ScanStats())
+        line = next(ln for ln in text.splitlines() if 'big.bin' in ln)
+        self.assertIn("Matched rule 'r' This version of big.bin was removed", line)
 
 
 class TestRemediationHint(unittest.TestCase):

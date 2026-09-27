@@ -21,8 +21,25 @@ class Blob:
     commit introduced there.
 
     Carries the per-file-version facts the rule engine matches against
-    (`is_binary`, `mime_type`, `size_bytes`), computed once by the
-    `size_resolver`/`type_detector` augmentation passes before evaluation.
+    (`is_binary`, `mime_type`, `size_bytes`, `is_transient`,
+    `is_transient_version`), computed once by the `size_resolver`/
+    `type_detector`/`transience` augmentation passes before evaluation.
+
+    Attributes:
+        is_transient: True when this file version's *path* exists at
+            neither the merge-base commit nor the head commit -- it was
+            added and removed again somewhere within the scanned range.
+            Always a definite `True`/`False` for a non-deleted blob once
+            `transience.augment_blob_objects_with_transience` has run;
+            `None` beforehand. Always `False` in `scan_mode: diff`, which
+            only ever sees the merge-base..head diff, never the
+            intermediate history that would make this `True`.
+        is_transient_version: True when this exact (path, content) pair --
+            this specific blob at this specific path -- exists at neither
+            the merge-base nor the head commit, even if some other content
+            now lives at the same path. `is_transient` implies
+            `is_transient_version`. Same `None`/diff-mode rules as
+            `is_transient`.
     """
     path: str
     blob_sha: str
@@ -32,6 +49,8 @@ class Blob:
     is_binary: Optional[bool] = None
     mime_type: Optional[str] = None
     type_confidence: Optional[str] = None
+    is_transient: Optional[bool] = None
+    is_transient_version: Optional[bool] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Blob':
@@ -52,7 +71,9 @@ class Blob:
             size_bytes=data.get('size_bytes'),
             is_binary=data.get('is_binary'),
             mime_type=data.get('mime_type'),
-            type_confidence=data.get('type_confidence')
+            type_confidence=data.get('type_confidence'),
+            is_transient=data.get('is_transient'),
+            is_transient_version=data.get('is_transient_version')
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -70,7 +91,9 @@ class Blob:
             'size_bytes': self.size_bytes,
             'is_binary': self.is_binary,
             'mime_type': self.mime_type,
-            'type_confidence': self.type_confidence
+            'type_confidence': self.type_confidence,
+            'is_transient': self.is_transient,
+            'is_transient_version': self.is_transient_version
         }
 
     @property

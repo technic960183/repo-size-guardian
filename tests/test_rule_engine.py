@@ -29,7 +29,8 @@ from repo_size_guardian.rule_engine import (
 
 
 def make_blob(path, blob_sha='a' * 40, commit_sha='b' * 40, status='A',
-              size_bytes=None, is_binary=None, mime_type=None):
+              size_bytes=None, is_binary=None, mime_type=None,
+              is_transient=None, is_transient_version=None):
     """Build a Blob for tests without needing a real git repo."""
     return Blob(
         path=path,
@@ -39,6 +40,8 @@ def make_blob(path, blob_sha='a' * 40, commit_sha='b' * 40, status='A',
         size_bytes=size_bytes,
         is_binary=is_binary,
         mime_type=mime_type,
+        is_transient=is_transient,
+        is_transient_version=is_transient_version,
     )
 
 
@@ -595,6 +598,58 @@ class TestRuleMatchesSize(unittest.TestCase):
         self.assertEqual(rule_matches(rule, make_blob('a.log', size_bytes=None)), (True, False))
 
 
+class TestRuleMatchesTransient(unittest.TestCase):
+    """`transient`/`transient_version` use plain equality, unlike `binary`."""
+
+    def test_transient_true_requires_definite_true(self):
+        rule = Rule(name='r', match_transient=True)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient=True))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_transient=False))[0])
+
+    def test_transient_false_does_not_also_match_undetermined(self):
+        # Unlike match_binary=False, an undetermined (None) value does NOT
+        # satisfy transient=False: transient values are always definite
+        # booleans in history mode, so None only ever means "not computed".
+        rule = Rule(name='r', match_transient=False)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient=False))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_transient=None))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_transient=True))[0])
+
+    def test_transient_none_means_no_condition(self):
+        rule = Rule(name='r', match_extensions=['txt'], match_transient=None)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient=True))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient=False))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient=None))[0])
+
+    def test_transient_version_true_requires_definite_true(self):
+        rule = Rule(name='r', match_transient_version=True)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient_version=True))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_transient_version=False))[0])
+
+    def test_transient_version_false_does_not_also_match_undetermined(self):
+        rule = Rule(name='r', match_transient_version=False)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_transient_version=False))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_transient_version=None))[0])
+
+    def test_transient_and_transient_version_combine_with_and(self):
+        rule = Rule(name='r', match_transient=True, match_transient_version=True)
+        self.assertTrue(rule_matches(
+            rule, make_blob('a.txt', is_transient=True, is_transient_version=True))[0])
+        # transient implies transient_version in practice, but the engine
+        # itself just ANDs the two conditions -- this combination cannot
+        # occur from a real transience pass, but must still evaluate
+        # correctly rather than assume it.
+        self.assertFalse(rule_matches(
+            rule, make_blob('a.txt', is_transient=True, is_transient_version=False))[0])
+
+    def test_transient_is_and_with_other_keys(self):
+        rule = Rule(name='r', match_extensions=['log'], match_transient=True)
+        self.assertFalse(rule_matches(
+            rule, make_blob('a.txt', is_transient=True))[0])  # wrong extension
+        self.assertFalse(rule_matches(
+            rule, make_blob('a.log', is_transient=False))[0])  # not transient
+
+
 # ---------------------------------------------------------------------------
 # Policy.is_empty
 # ---------------------------------------------------------------------------
@@ -681,7 +736,34 @@ class TestPolicyFromDictValid(unittest.TestCase):
         self.assertEqual(rule.match_mime_types, [])
         self.assertIsNone(rule.match_binary)
         self.assertIsNone(rule.match_size)
+        self.assertIsNone(rule.match_transient)
+        self.assertIsNone(rule.match_transient_version)
         self.assertEqual(rule.action, 'error')
+
+    def test_transient_and_transient_version_parse_as_booleans(self):
+        data = {'rules': [
+            {'id': 'r1', 'match': {'transient': True}},
+            {'id': 'r2', 'match': {'transient_version': False}},
+            {'id': 'r3', 'match': {'transient': False, 'transient_version': True}},
+        ]}
+        policy = Policy.from_dict(data)
+        by_id = {rule.id: rule for rule in policy.rules}
+        self.assertIs(by_id['r1'].match_transient, True)
+        self.assertIsNone(by_id['r1'].match_transient_version)
+        self.assertIs(by_id['r2'].match_transient_version, False)
+        self.assertIsNone(by_id['r2'].match_transient)
+        self.assertIs(by_id['r3'].match_transient, False)
+        self.assertIs(by_id['r3'].match_transient_version, True)
+
+    def test_transient_alone_counts_as_a_condition(self):
+        # Must not raise "match is required and must set at least one
+        # condition" -- transient/transient_version count on their own.
+        policy = Policy.from_dict({'rules': [{'match': {'transient': True}}]})
+        self.assertEqual(len(policy.rules), 1)
+
+    def test_transient_version_alone_counts_as_a_condition(self):
+        policy = Policy.from_dict({'rules': [{'match': {'transient_version': False}}]})
+        self.assertEqual(len(policy.rules), 1)
 
     def test_anonymous_rules_get_index_based_names(self):
         data = {'rules': [
@@ -738,6 +820,13 @@ class TestPolicyFromDictErrors(unittest.TestCase):
             {'rules': [{'match': {'binary': None, 'size': None}}]},
             "'rules[0]'.match", 'at least one condition')
 
+    def test_match_with_only_null_transient_conditions(self):
+        message = self.assertPolicyErrorMentions(
+            {'rules': [{'match': {'transient': None, 'transient_version': None}}]},
+            "'rules[0]'.match", 'at least one condition')
+        self.assertIn('transient', message)
+        self.assertIn('transient_version', message)
+
     def test_null_glob_entry_points_at_quoting(self):
         # An unquoted "#pattern" list item is a YAML comment, leaving null.
         self.assertPolicyErrorMentions(
@@ -752,14 +841,13 @@ class TestPolicyFromDictErrors(unittest.TestCase):
         self.assertPolicyErrorMentions(
             {'rules': [{'match': {'ext': ['py']}}]}, 'ext', 'extensions')
 
-    def test_transient_match_key_rejected_as_unknown(self):
-        # `transient`/`transient_version` are not accepted yet.
+    def test_transient_match_wrong_type(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'match': {'transient': True}}]}, 'transient')
+            {'rules': [{'match': {'transient': 'yes'}}]}, 'match.transient')
 
-    def test_transient_version_match_key_rejected_as_unknown(self):
+    def test_transient_version_match_wrong_type(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'match': {'transient_version': True}}]}, 'transient_version')
+            {'rules': [{'match': {'transient_version': 'yes'}}]}, 'match.transient_version')
 
     def test_rules_not_a_list(self):
         self.assertPolicyErrorMentions({'rules': {'id': 'r'}}, 'rules', 'list')

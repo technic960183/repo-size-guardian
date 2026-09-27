@@ -1,0 +1,14 @@
+# Fixture policy for the CI self-test's "transient file" case
+# (.github/workflows/ci.yml, self-test job).
+#
+# Defines exactly one rule matching `transient: true`. The self-test pairs
+# this policy with a file added in one commit and deleted in a later commit
+# within the same PR -- a file version only `scan_mode: history` ever sees
+# at all (a merge-base..head diff collapses it away entirely), and exactly
+# what `match.transient` exists to catch.
+rules:
+  - id: no-transient-files
+    description: "Files must not be added and removed again within the same pull request"
+    match:
+      transient: true
+    action: error

@@ -323,6 +323,60 @@ class TestStopRule(GitRepoTestBase):
         self.assertIn('No violations found', stdout)
 
 
+class TestTransientPolicyRule(GitRepoTestBase):
+    """A `match: {transient: true}` policy rule catches a file added and
+    removed again within the same PR, end to end through the CLI."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.create_file('policy.yml', (
+            "rules:\n"
+            "  - id: no-transient-files\n"
+            "    match: {transient: true}\n"
+            "    action: error\n"
+        ))
+
+    def test_added_then_deleted_file_fails_the_job(self):
+        self.helper.commit_file('scratch.txt', 'temporary content', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn('scratch.txt', stdout)
+        self.assertIn("Matched rule 'no-transient-files'", stdout)
+
+    def test_report_carries_the_history_rewrite_note(self):
+        self.helper.commit_file('scratch.txt', 'temporary content', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            'This version of scratch.txt was removed or replaced later in '
+            'this pull request, but it stays in the history.', stdout)
+
+    def test_a_file_that_stays_passes(self):
+        self.helper.commit_file('keep.txt', 'stays around', 'Add a file that stays')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+
 class TestScanModeHistoryVsDiff(GitRepoTestBase):
     """
     history mode catches a blob added and then deleted within the PR;
@@ -1213,6 +1267,76 @@ class TestMimeMatchingUnavailableWarning(GitRepoTestBase):
             '--base-ref', 'main', '--head-ref', 'feature',
             '--policy-path', 'policy.yml'])
         self.assertNotIn('`file` command', stdout)
+
+
+class TestTransientMatchingUnavailableWarning(GitRepoTestBase):
+    """
+    `transient`/`transient_version` can never hold in scan_mode: diff, which
+    only ever sees the final net diff -- exactly what already collapses away
+    the file versions those keys exist to catch.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('scratch.txt', 'temp', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+    def test_warns_once_in_diff_mode_when_a_rule_uses_transient(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true}\n    action: error\n"
+        ))
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        # diff mode collapses the add+delete away entirely, so there is
+        # nothing left to flag -- the warning is the only signal.
+        self.assertEqual(exit_code, 0)
+        self.assertIn('::warning::', stdout)
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+        self.assertIn('Use scan_mode: history', stdout)
+
+    def test_warns_once_in_diff_mode_when_a_rule_uses_transient_version(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient_version: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+
+    def test_warns_only_once_when_a_rule_uses_both_keys(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true, transient_version: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+
+    def test_no_warning_when_the_policy_does_not_use_transient(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {extensions: [\"exe\"]}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertNotIn("scan_mode is 'diff'", stdout)
+
+    def test_no_warning_in_history_mode(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'history', '--policy-path', 'policy.yml',
+        ])
+        self.assertNotIn("scan_mode is 'diff'", stdout)
 
 
 if __name__ == '__main__':

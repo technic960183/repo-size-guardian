@@ -17,6 +17,7 @@ from repo_size_guardian.git_utils import (
     git_cat_file_exists,
     git_cat_file_size,
     list_commits,
+    list_tree_blobs,
     parse_raw_diff_z,
 )
 from tests.test_base import GitRepoTestBase
@@ -729,6 +730,74 @@ class TestGetDiffFilesBetween(GitRepoTestBase):
         parent = self.helper.run_git('rev-parse', 'HEAD~1').stdout.strip()
 
         self.assertEqual(get_diff_files_between(parent, head), get_diff_files(head))
+
+
+class TestListTreeBlobs(GitRepoTestBase):
+    """Test cases for list_tree_blobs function."""
+
+    def test_single_file(self):
+        commit_sha = self.helper.commit_file('a.txt', 'content', 'Add a')
+        blob_sha = get_blob_sha_at_commit(commit_sha, 'a.txt')
+
+        tree = list_tree_blobs(commit_sha)
+        self.assertEqual(tree, {'a.txt': blob_sha})
+
+    def test_nested_paths_are_listed_recursively(self):
+        self.helper.commit_file('a.txt', 'content', 'Add a')
+        commit_sha = self.helper.commit_file('dir/sub/b.txt', 'nested', 'Add nested b')
+
+        tree = list_tree_blobs(commit_sha)
+        self.assertEqual(
+            tree,
+            {
+                'a.txt': get_blob_sha_at_commit(commit_sha, 'a.txt'),
+                'dir/sub/b.txt': get_blob_sha_at_commit(commit_sha, 'dir/sub/b.txt'),
+            }
+        )
+
+    def test_deleted_file_is_absent_from_a_later_commit(self):
+        self.helper.commit_file('a.txt', 'content', 'Add a')
+        self.helper.commit_file('b.txt', 'content2', 'Add b')
+        commit_sha = self.helper.delete_file('b.txt', 'Delete b')
+
+        tree = list_tree_blobs(commit_sha)
+        self.assertEqual(list(tree), ['a.txt'])
+
+    def test_submodule_gitlink_is_skipped(self):
+        self.helper.commit_file('a.txt', 'content', 'Add a')
+        commit_sha = self.helper.commit_gitlink('mysub', 'Add submodule')
+
+        tree = list_tree_blobs(commit_sha)
+        self.assertEqual(list(tree), ['a.txt'])
+
+    def test_same_path_different_commits_reports_the_commit_specific_blob(self):
+        first_commit = self.helper.commit_file('a.txt', 'version1', 'First version')
+        second_commit = self.helper.commit_file('a.txt', 'version2', 'Second version')
+
+        first_tree = list_tree_blobs(first_commit)
+        second_tree = list_tree_blobs(second_commit)
+        self.assertNotEqual(first_tree['a.txt'], second_tree['a.txt'])
+
+    def test_non_ascii_and_trailing_whitespace_paths_survive_intact(self):
+        self.helper.commit_file('a.txt', 'content', 'Add a')
+        self.helper.create_file('café.txt', 'unicode')
+        self.helper.create_file('zz trailing ', 'spaces')
+        self.helper.run_git('add', '.')
+        self.helper.run_git('commit', '-m', 'Add awkward paths')
+        commit_sha = self.helper.run_git('rev-parse', 'HEAD').stdout.strip()
+
+        tree = list_tree_blobs(commit_sha)
+        self.assertIn('café.txt', tree)
+        self.assertIn('zz trailing ', tree)
+
+    def test_empty_file_blob_is_still_listed(self):
+        commit_sha = self.helper.commit_file('a.txt', '', 'Add empty file')
+        tree = list_tree_blobs(commit_sha)
+        self.assertEqual(tree, {'a.txt': get_blob_sha_at_commit(commit_sha, 'a.txt')})
+
+    def test_invalid_commit_raises(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            list_tree_blobs('not-a-real-commit')
 
 
 class TestParseRawDiffZ(GitRepoTestBase):

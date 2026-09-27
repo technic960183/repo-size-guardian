@@ -31,7 +31,9 @@ from .models import Blob
 
 _TOP_LEVEL_KEYS = frozenset({'rules'})
 _RULE_KEYS = frozenset({'id', 'description', 'match', 'action'})
-_RULE_MATCH_KEYS = frozenset({'globs', 'extensions', 'mime_types', 'binary', 'size'})
+_RULE_MATCH_KEYS = frozenset({
+    'globs', 'extensions', 'mime_types', 'binary', 'size', 'transient', 'transient_version',
+})
 _VALID_ACTIONS = frozenset({'warn', 'error', 'stop'})
 
 #: Grammar: optional whitespace, an operator, optional whitespace, a
@@ -172,6 +174,13 @@ class Rule:
             `blob.is_binary` to equal this value (`False` also matches an
             undetermined type -- see `_binary_condition_holds`).
         match_size: If not None, an additional condition on the blob's size.
+        match_transient / match_transient_version: If not None, an
+            additional condition requiring `blob.is_transient` /
+            `blob.is_transient_version` to equal this value exactly (plain
+            equality -- unlike `match_binary`, there is no "also matches
+            undetermined" case: in history mode these are always definite
+            booleans on a file version that reaches evaluation at all; see
+            `transience.py`).
         action: What happens when every condition holds: `'warn'` or
             `'error'` records a hit and evaluation continues to the next
             rule; `'stop'` ends evaluation for this file version, keeping
@@ -189,6 +198,8 @@ class Rule:
     match_mime_types: List[str] = field(default_factory=list)
     match_binary: Optional[bool] = None
     match_size: Optional[SizeCondition] = None
+    match_transient: Optional[bool] = None
+    match_transient_version: Optional[bool] = None
     action: str = "error"
     is_input_rule: bool = False
 
@@ -442,6 +453,11 @@ def rule_matches(rule: Rule, blob: Blob) -> Tuple[bool, bool]:
             return False, True
         if not rule.match_size.holds(blob.size_bytes):
             return False, False
+    if rule.match_transient is not None and blob.is_transient != rule.match_transient:
+        return False, False
+    if (rule.match_transient_version is not None
+            and blob.is_transient_version != rule.match_transient_version):
+        return False, False
     return True, False
 
 
@@ -546,15 +562,30 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
             f"{context}.match.binary must be true or false, got {_type_name(match_binary)}"
         )
 
+    match_transient = match.get('transient')
+    if match_transient is not None and not isinstance(match_transient, bool):
+        raise PolicyError(
+            f"{context}.match.transient must be true or false, got {_type_name(match_transient)}"
+        )
+
+    match_transient_version = match.get('transient_version')
+    if match_transient_version is not None and not isinstance(match_transient_version, bool):
+        raise PolicyError(
+            f"{context}.match.transient_version must be true or false, "
+            f"got {_type_name(match_transient_version)}"
+        )
+
     match_size = None
     if match.get('size') is not None:
         match_size = parse_size_condition(match['size'], f"{context}.match.size")
 
     if not (match_globs or match_extensions or match_mime_types
-            or match_binary is not None or match_size is not None):
+            or match_binary is not None or match_size is not None
+            or match_transient is not None or match_transient_version is not None):
         raise PolicyError(
             f"{context}.match is required and must set at least one condition "
-            f"(globs, extensions, mime_types, binary, or size)"
+            f"(globs, extensions, mime_types, binary, size, transient, or "
+            f"transient_version)"
         )
 
     action = rule_data.get('action', 'error')
@@ -571,5 +602,7 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
         match_mime_types=match_mime_types,
         match_binary=match_binary,
         match_size=match_size,
+        match_transient=match_transient,
+        match_transient_version=match_transient_version,
         action=action,
     )
