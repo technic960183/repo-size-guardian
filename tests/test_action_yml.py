@@ -164,6 +164,7 @@ class TestScanStepShellBehavior(unittest.TestCase):
                                scan_mode='diff', dedupe_blobs='false',
                                annotate_pr='false', max_annotations='0',
                                max_text_size_kb='500', max_binary_size_kb='100',
+                               disallow_extensions='exe, dll',
                                base_ref='origin/main', head_ref='HEAD')
         self.assertEqual(argv[:2], ['-m', 'repo_size_guardian'])
         flags = argv[2:]
@@ -176,6 +177,7 @@ class TestScanStepShellBehavior(unittest.TestCase):
             '--max-annotations', '0',
             '--max-text-size-kb', '500',
             '--max-binary-size-kb', '100',
+            '--disallow-extensions', 'exe, dll',
             '--base-ref', 'origin/main',
             '--head-ref', 'HEAD',
         ])

@@ -27,26 +27,48 @@ jobs:
         with:
           fetch-depth: 0    # full history, so every commit can be scanned
       - uses: technic960183/repo-size-guardian@v1
+        with:
+          max_text_size_kb: 1000
+          max_binary_size_kb: 200
+          disallow_extensions: "exe, dll, zip"
 ```
 
-Then describe what your repository allows:
+That's the whole setup: it blocks a commit that adds a text file over
+1000 KB, a binary file over 200 KB, or a file with a banned extension, at
+any size.
+
+For more control, replace those inputs with a policy file:
 
 ```yaml
 # .github/repo-size-guardian.yml
-thresholds:
-  max_binary_size_kb: 500             # any binary over 500 KB
-disallow:
-  extensions: [exe, ipynb]            # never, at any size
 rules:
+  - id: skip-vendor
+    match: { globs: ["vendor/**"] }
+    action: stop
+  - id: no-executables
+    match: { extensions: [exe, dll, zip] }
+  - id: large-assets
+    match: { size: ">5MB" }
   - id: large-csv
-    match: { globs: ["**/*.csv"] }
-    size_over_kb: 2000
-    action: warn                      # report it, don't block
-overrides:
-  allow_globs: [data/baseline.h5]     # this one file is fine
+    description: CSV files belong in the data bucket
+    match: { globs: ["**/*.csv"], size: ">2MB" }
+    action: warn
+  - id: added-then-removed
+    description: Files that don't survive to the end of this pull request
+    match: { transient: true, size: ">1MB" }
+    action: warn
 ```
 
-- Rules by path, extension or file type, each set to warn or block
+Rules run top to bottom: `stop` skips every later rule for a matching file,
+so nothing under `vendor/` ever reaches the checks below it. `warn` reports
+a file without failing the job. The last rule catches a file added and
+deleted within the same pull request — the kind of change a check on the
+final diff alone would never see.
+
+- Rules by path, extension, type or size, each set to warn, block, or stop
+  checking further rules
+- Catches a file even if a later commit in the same pull request removes or
+  shrinks it
 - Results in the job summary and as annotations on the pull request
 - Needs no token or extra permissions
 

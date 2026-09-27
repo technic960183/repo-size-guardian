@@ -1,107 +1,153 @@
 # Policy guide
 
-A policy file describes what your repository allows. This guide builds one
-step by step in `.github/repo-size-guardian.yml`, adding a few lines at a
-time.
+A policy file describes what your repository allows: an ordered list of
+`rules` in `.github/repo-size-guardian.yml`. This guide builds one step by
+step, a few rules at a time.
 
-## 1. Limit file sizes
+## 1. Move from the inputs
 
 ```yaml
-thresholds:
-  max_text_size_kb: 500
-  max_binary_size_kb: 100
+rules:
+  - id: max_text_size_kb
+    match: { binary: false, size: ">500KB" }
+  - id: max_binary_size_kb
+    match: { binary: true, size: ">100KB" }
 ```
 
-Text and binary files get separate limits. The action tells them apart by
-content, not by file name.
+These are the limits the `max_text_size_kb: 500` and
+`max_binary_size_kb: 100` inputs set, written out as rules. Remove the
+inputs from the workflow: a policy file and the inputs can't be used
+together.
+
+A `size` condition is one quoted string: an operator (`>`, `>=`, `<`,
+`<=`), a number, and a unit (`B`, `KB`, `MB`, `GB`).
 
 ## 2. Ban file types
 
+Add to the end of the list:
+
 ```yaml
-disallow:
-  extensions: [exe, dll, zip]
+  - id: no-executables
+    match: { extensions: [exe, dll, zip] }
 ```
 
-A file with a banned extension fails at any size. `disallow` also accepts
-`globs` for paths and `mime_types` for content types.
+A rule without a `size` condition matches at any size. Its `action`
+defaults to `error`.
 
 ## 3. Make an exception
 
+Add to the top of the list:
+
 ```yaml
-overrides:
-  allow_globs:
-    - data/reference/baseline.zip
+  - id: allow-baseline
+    match: { globs: ["data/reference/baseline.zip"] }
+    action: stop
 ```
 
-This file passes every check, even though `.zip` is banned. Name the exact
-file, so the exception covers only what you meant.
+Rules run top to bottom, and `stop` ends checking for a matching file. This
+one `.zip` never reaches `no-executables`. A `stop` rule below
+`no-executables` would be too late: the file would already have failed.
 
 ## 4. Skip folders
 
+Add below `allow-baseline`:
+
 ```yaml
-ignore:
-  globs:
-    - "vendor/**"
-    - "*.min.js"
+  - id: skip-vendor
+    match: { globs: ["vendor/**", "*.min.js"] }
+    action: stop
 ```
 
-Ignored paths are never checked, not even against `disallow`. See
-[Globs](reference/policy.md#globs) for the full syntax.
+Nothing under `vendor/`, and no file named `*.min.js`, reaches the rules
+below. See [Globs](reference/policy.md#globs) for the full pattern syntax.
 
-## 5. Add rules
+## 5. Warn instead of blocking
 
-Rules give specific files their own limit and severity:
+Add below `skip-vendor`:
 
 ```yaml
-rules:
   - id: large-csv
     description: CSV files belong in the data bucket
-    match:
-      globs: ["data/**/*.csv"]
-    size_over_kb: 2000
+    match: { globs: ["data/**/*.csv"], size: ">2MB" }
+    action: warn
+  - id: csv-handled
+    match: { globs: ["data/**/*.csv"] }
+    action: stop
+```
+
+`action: warn` reports a file without failing the check, unless the
+workflow sets `fail_on: any`. A `warn` or `error` rule doesn't end checking,
+so a big CSV would also fail `max_text_size_kb`. `csv-handled` stops every
+CSV right after `large-csv`, so a CSV is only ever warned about.
+
+## 6. Catch files a pull request adds and removes again
+
+Add to the end of the list:
+
+```yaml
+  - id: added-then-removed
+    description: Files that don't survive to the end of this pull request
+    match: { transient: true, size: ">200KB" }
+    action: warn
+  - id: shrunk-in-history
+    description: An earlier, larger version of this file stays in history
+    match: { transient_version: true, size: ">1MB" }
     action: warn
 ```
 
-- `match` picks files by `globs`, `extensions`, `mime_types` or `binary`.
-- `size_over_kb` reports only files larger than this. Without it, every
-  matching file is reported.
-- `action: warn` reports the file without failing the check, unless the
-  workflow sets `fail_on: any`.
+`transient` matches a file that exists at neither end of the pull request:
+added in one commit, deleted in a later one. `transient_version` also
+matches an earlier version of a file that is still there at the end, such
+as a 50 MB CSV later shrunk to 1 KB. Always pair `transient_version` with a
+`size` condition: on its own it matches every intermediate edit.
 
-Rules are checked in order, and the first rule that matches a file decides
-it. A 1000 KB CSV under `data/` passes here, even though it's over
-`max_text_size_kb`.
+Both need `scan_mode: history`, the default. In `diff` mode only the final
+result is scanned, so neither ever matches.
 
-## 6. The whole policy
+## 7. The whole policy
 
 ```yaml
-thresholds:
-  max_text_size_kb: 500
-  max_binary_size_kb: 100
-
-disallow:
-  extensions: [exe, dll, zip]
-
-overrides:
-  allow_globs:
-    - data/reference/baseline.zip
-
-ignore:
-  globs:
-    - "vendor/**"
-    - "*.min.js"
-
 rules:
+  - id: allow-baseline
+    match: { globs: ["data/reference/baseline.zip"] }
+    action: stop
+
+  - id: skip-vendor
+    match: { globs: ["vendor/**", "*.min.js"] }
+    action: stop
+
   - id: large-csv
     description: CSV files belong in the data bucket
-    match:
-      globs: ["data/**/*.csv"]
-    size_over_kb: 2000
+    match: { globs: ["data/**/*.csv"], size: ">2MB" }
+    action: warn
+
+  - id: csv-handled
+    match: { globs: ["data/**/*.csv"] }
+    action: stop
+
+  - id: max_text_size_kb
+    match: { binary: false, size: ">500KB" }
+
+  - id: max_binary_size_kb
+    match: { binary: true, size: ">100KB" }
+
+  - id: no-executables
+    match: { extensions: [exe, dll, zip] }
+
+  - id: added-then-removed
+    description: Files that don't survive to the end of this pull request
+    match: { transient: true, size: ">200KB" }
+    action: warn
+
+  - id: shrunk-in-history
+    description: An earlier, larger version of this file stays in history
+    match: { transient_version: true, size: ">1MB" }
     action: warn
 ```
 
-The order of the sections doesn't matter. Every file goes through the same
-[evaluation order](reference/policy.md#evaluation-order).
+A file can match several rules before a `stop`. The report lists every
+rule it matched, at the highest severity among them. See
+[How rules are applied](reference/policy.md#how-rules-are-applied).
 
 ## Next
 

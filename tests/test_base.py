@@ -32,8 +32,8 @@ def isolate_github_environment(test: unittest.TestCase) -> None:
 
     - `GITHUB_STEP_SUMMARY`/`GITHUB_OUTPUT` are the run's own job summary and
       step output, so an un-isolated test that completes a scan would append
-      a real "Repo Size Guardian" table and a real violations_found=/summary=
-      line to them -- stray, misleading noise on a public repo's Actions run.
+      a real "Repo Size Guardian" table and real violation_count=/summary=
+      lines to them -- stray, misleading noise on a public repo's Actions run.
     - `GITHUB_EVENT_PATH`/`GITHUB_EVENT_NAME`/`GITHUB_BASE_REF` describe the
       run's own trigger, so the code path a test takes through
       `resolve_refs` (and the coverage it reports) would depend on whether

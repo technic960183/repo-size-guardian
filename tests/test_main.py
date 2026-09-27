@@ -2,12 +2,13 @@
 Integration tests for the main.py CLI pipeline, over real temporary git
 repositories (see tests/test_base.py).
 
-These exercise the full wiring: ref resolution -> merge-base -> blob
-enumeration -> size/type augmentation -> policy evaluation -> reporting ->
-exit code. Lower-level behavior of each stage (glob matching, evaluation
-order, report formatting, ...) is already covered by
+These exercise the full wiring: input/policy validation -> ref resolution ->
+merge-base -> blob enumeration -> size/type augmentation -> rule evaluation
+-> reporting -> exit code. Lower-level behavior of each stage (glob
+matching, evaluation order, report formatting, ...) is already covered by
 test_rule_engine.py/test_evaluator.py/test_reporting.py; these tests focus
-on whether main.py wires the pieces together correctly.
+on whether main.py wires the pieces together correctly, including the
+policy/quick-start-input exclusivity and the exit code table (0/1/2/3).
 """
 
 import argparse
@@ -20,6 +21,8 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+
+import yaml
 
 from repo_size_guardian import main as main_module
 from tests.test_base import GitRepoTestBase, isolate_github_environment
@@ -74,6 +77,192 @@ class TestCleanAndViolatingPR(GitRepoTestBase):
         self.assertEqual(exit_code, 1)
         self.assertIn('big.bin', stdout)
         self.assertIn('ERROR', stdout)
+        self.assertIn('Binary file size', stdout)
+
+
+class TestDisallowExtensionsInput(GitRepoTestBase):
+    """The `--disallow-extensions` quick-start input acts as a rule."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+
+    def test_disallowed_extension_fails_the_job(self):
+        self.helper.commit_file('a.exe', 'binary-ish', 'Add an exe')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', 'exe, dll',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("File extension '.exe' is disallowed", stdout)
+
+    def test_extension_not_in_the_list_passes(self):
+        self.helper.commit_file('a.txt', 'just text', 'Add a text file')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', 'exe, dll',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+    def test_leading_dots_and_extra_whitespace_are_tolerated(self):
+        self.helper.commit_file('a.DLL', 'binary-ish', 'Add a dll')
+
+        exit_code, _stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', '  .exe ,\t.dll  ',
+        ])
+
+        self.assertEqual(exit_code, 1)
+
+
+class TestQuickStartSizeInputs(GitRepoTestBase):
+    """The size inputs act as rules, whatever their magnitude."""
+
+    def test_large_limit_is_valid(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('a.txt', 'X' * 2000, 'Add a text file')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--max-text-size-kb', '1048576',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+
+class TestQuickStartRuleOrder(GitRepoTestBase):
+    """
+    A file matching several quick-start-input rules gets one entry that
+    lists every hit, in the table's fixed order.
+    """
+
+    def test_disallowed_extension_and_oversized_reported_together(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('a.exe', 'X' * 2000, 'Add an oversized exe')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', 'exe',
+            '--max-text-size-kb', '1',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        entry_line = next(
+            line for line in stdout.splitlines() if 'a.exe' in line and 'ERROR' in line)
+        self.assertIn("File extension '.exe' is disallowed", entry_line)
+        self.assertIn('Text file size', entry_line)
+        self.assertIn('[rules: disallow_extensions, max_text_size_kb]', entry_line)
+
+
+class TestPolicyAndInputsConflict(GitRepoTestBase):
+    """A policy file and any quick-start input are mutually exclusive."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+        self.helper.create_file('policy.yml', "rules: []\n")
+
+    def test_conflict_with_one_input_exits_two(self):
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml', '--max-text-size-kb', '500',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn(
+            "Policy file 'policy.yml' can't be combined with the "
+            "max_text_size_kb input(s)", stderr)
+        self.assertIn(
+            "Remove the input(s) from the workflow, or add these rules to "
+            "the policy file:", stderr)
+
+    def test_an_empty_policy_file_still_conflicts(self):
+        self.helper.create_file('empty_policy.yml', '')
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'empty_policy.yml', '--max-binary-size-kb', '100',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("Policy file 'empty_policy.yml' can't be combined", stderr)
+
+    def test_message_lists_every_set_input_in_table_order(self):
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+            '--max-binary-size-kb', '200',
+            '--disallow-extensions', 'exe',
+            '--max-text-size-kb', '500',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn(
+            "disallow_extensions, max_text_size_kb, max_binary_size_kb input(s)", stderr)
+
+    def test_printed_rules_parse_back_into_an_equivalent_policy(self):
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+            '--disallow-extensions', 'exe, dll',
+            '--max-text-size-kb', '500',
+            '--max-binary-size-kb', '200',
+        ])
+        self.assertEqual(exit_code, 2)
+
+        yaml_block = stderr.split('policy file:\n\n', 1)[1]
+        data = yaml.safe_load(yaml_block)
+        self.assertEqual(len(data['rules']), 3)
+        by_id = {rule['id']: rule for rule in data['rules']}
+
+        self.assertEqual(by_id['disallow_extensions']['match']['extensions'], ['exe', 'dll'])
+        self.assertEqual(by_id['disallow_extensions']['action'], 'error')
+
+        self.assertEqual(by_id['max_text_size_kb']['match']['binary'], False)
+        self.assertEqual(by_id['max_text_size_kb']['match']['size'], '> 500 KB')
+
+        self.assertEqual(by_id['max_binary_size_kb']['match']['binary'], True)
+        self.assertEqual(by_id['max_binary_size_kb']['match']['size'], '> 200 KB')
+
+        # The printed policy must itself be valid -- i.e. loadable by the
+        # same schema this run just rejected the combination against.
+        from repo_size_guardian.rule_engine import Policy
+        policy = Policy.from_dict(data)
+        self.assertEqual(len(policy.rules), 3)
+
+    def test_no_conflict_when_policy_file_does_not_exist(self):
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'does-not-exist.yml', '--max-text-size-kb', '1000',
+        ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+    def test_no_conflict_when_no_quick_start_input_is_set(self):
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+    def test_conflict_is_checked_before_any_git_work(self):
+        # A base ref that cannot possibly resolve; if the conflict check
+        # did not run first, this would fail with a *different* error
+        # (an unresolvable ref), not the policy/inputs conflict.
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'no-such-ref-at-all', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml', '--max-text-size-kb', '500',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn("can't be combined", stderr)
 
 
 class TestFailOnSeverity(GitRepoTestBase):
@@ -107,6 +296,85 @@ class TestFailOnSeverity(GitRepoTestBase):
         ])
         self.assertEqual(exit_code, 1)
         self.assertIn('WARN', stdout)
+
+
+class TestStopRule(GitRepoTestBase):
+    """A policy `stop` rule excludes a file from every rule listed after it."""
+
+    def test_stop_rule_excludes_a_file_a_later_rule_would_flag(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.create_file('policy.yml', (
+            "rules:\n"
+            "  - id: skip-vendor\n"
+            "    match: {globs: [\"vendor/**\"]}\n"
+            "    action: stop\n"
+            "  - id: no-exe\n"
+            "    match: {extensions: [\"exe\"]}\n"
+            "    action: error\n"
+        ))
+        self.helper.commit_file('vendor/a.exe', 'binary-ish', 'Add a vendored exe')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
+
+
+class TestTransientPolicyRule(GitRepoTestBase):
+    """A `match: {transient: true}` policy rule catches a file added and
+    removed again within the same PR, end to end through the CLI."""
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.create_file('policy.yml', (
+            "rules:\n"
+            "  - id: no-transient-files\n"
+            "    match: {transient: true}\n"
+            "    action: error\n"
+        ))
+
+    def test_added_then_deleted_file_fails_the_job(self):
+        self.helper.commit_file('scratch.txt', 'temporary content', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn('scratch.txt', stdout)
+        self.assertIn("Matched rule 'no-transient-files'", stdout)
+
+    def test_report_carries_the_history_rewrite_note(self):
+        self.helper.commit_file('scratch.txt', 'temporary content', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn(
+            'This version of scratch.txt was removed or replaced later in '
+            'this pull request, but it stays in the history.', stdout)
+
+    def test_a_file_that_stays_passes(self):
+        self.helper.commit_file('keep.txt', 'stays around', 'Add a file that stays')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('No violations found', stdout)
 
 
 class TestScanModeHistoryVsDiff(GitRepoTestBase):
@@ -254,6 +522,21 @@ class TestShallowClonePreflight(unittest.TestCase):
         self.assertNotIn('bug', annotation_line.lower())
         self.assertNotIn('repo-size-guardian/issues', annotation_line)
 
+    def test_shallow_clone_writes_a_configuration_error_job_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = os.path.join(tmp, 'summary.md')
+            with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': summary_path}):
+                exit_code, _stdout, _stderr = run_cli(
+                    ['--base-ref', 'HEAD~1', '--head-ref', 'HEAD'])
+            self.assertEqual(exit_code, 2)
+            with open(summary_path, encoding='utf-8') as handle:
+                summary = handle.read()
+            self.assertIn('## Repo Size Guardian', summary)
+            self.assertIn('**Status:** Configuration error', summary)
+            self.assertIn('fetch-depth: 0', summary)
+            self.assertIn("this repository's repo-size-guardian setup", summary)
+            self.assertIn('A maintainer needs to fix it', summary)
+
 
 class TestMalformedPolicy(GitRepoTestBase):
     """A malformed policy file is a configuration error: exit code 2."""
@@ -272,9 +555,39 @@ class TestMalformedPolicy(GitRepoTestBase):
         self.assertEqual(exit_code, 2)
         self.assertIn('bad_policy.yml', stderr)
 
+    def test_malformed_policy_is_checked_before_any_git_work(self):
+        # No commits at all yet, and a nonsensical base ref: if policy
+        # validation did not run first, this would fail on ref resolution
+        # instead of the malformed policy.
+        self.helper.create_file('bad_policy.yml', 'rules: [unterminated\n')
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'no-such-ref', '--head-ref', 'HEAD',
+            '--policy-path', 'bad_policy.yml',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('bad_policy.yml', stderr)
+
+    def test_malformed_policy_produces_no_violation_output(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+        self.helper.create_file('bad_policy.yml', 'rules: [unterminated\n')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = os.path.join(tmp, 'gh_output')
+            open(output_path, 'w', encoding='utf-8').close()
+            with mock.patch.dict(os.environ, {'GITHUB_OUTPUT': output_path}):
+                exit_code, _stdout, _stderr = run_cli([
+                    '--base-ref', 'main', '--head-ref', 'feature',
+                    '--policy-path', 'bad_policy.yml',
+                ])
+            self.assertEqual(exit_code, 2)
+            with open(output_path, encoding='utf-8') as handle:
+                self.assertEqual(handle.read(), '')
+
 
 class TestEmptyConfigWarning(GitRepoTestBase):
-    """No policy and no thresholds set -> a prominent warning, but exit 0."""
+    """No policy and no quick-start inputs -> a prominent warning, but exit 0."""
 
     def test_empty_config_warns_but_does_not_fail(self):
         self.helper.commit_file('README.md', 'hello', 'Base commit')
@@ -301,6 +614,50 @@ class TestEmptyConfigWarning(GitRepoTestBase):
 
         self.assertEqual(exit_code, 0)
         self.assertNotIn('::warning::', stdout)
+
+    def test_disallow_extensions_alone_suppresses_the_warning(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', 'exe',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn('::warning::', stdout)
+
+    def test_policy_file_with_rules_suppresses_the_warning(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {extensions: [\"exe\"]}\n    action: error\n"
+        ))
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertNotIn('::warning::', stdout)
+
+    def test_policy_file_with_no_rules_still_warns(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+        self.helper.create_file('policy.yml', "rules: []\n")
+
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--policy-path', 'policy.yml',
+        ])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('::warning::', stdout)
+        self.assertIn('nothing is being enforced', stdout.lower())
 
 
 class TestResolveRefs(unittest.TestCase):
@@ -431,6 +788,27 @@ class TestBooleanParsing(unittest.TestCase):
     def test_invalid_value_raises_config_error(self):
         with self.assertRaises(main_module.ConfigError):
             main_module._parse_bool('nope', '--dedupe-blobs')
+
+
+class TestParseExtensionList(unittest.TestCase):
+    """--disallow-extensions splits on commas and/or whitespace."""
+
+    def test_comma_separated(self):
+        self.assertEqual(main_module._parse_extension_list('exe,dll,zip'), ['exe', 'dll', 'zip'])
+
+    def test_comma_and_whitespace(self):
+        self.assertEqual(main_module._parse_extension_list('exe, dll, zip'), ['exe', 'dll', 'zip'])
+
+    def test_whitespace_only(self):
+        self.assertEqual(main_module._parse_extension_list('exe   dll'), ['exe', 'dll'])
+
+    def test_leading_dots_preserved_for_later_matching(self):
+        # matches_extension itself is dot-insensitive; the split just keeps
+        # whatever was written.
+        self.assertEqual(main_module._parse_extension_list('.exe, .dll'), ['.exe', '.dll'])
+
+    def test_extra_separators_collapse(self):
+        self.assertEqual(main_module._parse_extension_list(' , exe ,, dll ,'), ['exe', 'dll'])
 
 
 class TestDiffModeUsesMergeBase(GitRepoTestBase):
@@ -628,8 +1006,8 @@ class TestMissingCommitInCheckout(GitRepoTestBase):
         self.assertNotIn('fetch-depth', stderr)
 
 
-class TestNumericInputValidation(GitRepoTestBase):
-    """Negative numeric inputs are typos, and must not degrade silently."""
+class TestArgValidation(GitRepoTestBase):
+    """A handful of inputs are typos that must not degrade silently."""
 
     def setUp(self):
         super().setUp()
@@ -669,17 +1047,34 @@ class TestNumericInputValidation(GitRepoTestBase):
                      '--max-annotations', 'lots'])
         self.assertEqual(caught.exception.code, 2)
 
+    def test_disallow_extensions_with_no_extensions_is_a_config_error(self):
+        # An empty match.extensions list imposes NO condition, so this
+        # would otherwise silently build a rule that disallows every file.
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', ' , ',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('--disallow-extensions', stderr)
+        self.assertIn('no extensions', stderr)
+
+    def test_disallow_extensions_all_whitespace_is_a_config_error(self):
+        exit_code, _stdout, stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--disallow-extensions', '   ',
+        ])
+        self.assertEqual(exit_code, 2)
+        self.assertIn('--disallow-extensions', stderr)
+
 
 class TestUnexpectedExceptionExitCode(GitRepoTestBase):
     """
-    An internal crash must not be reported as exit code 1.
-
-    Exit 1 means "violations found", so an uncaught exception escaping
-    main() would make a workflow -- and a human reading the log -- treat a
-    bug in this tool as a policy violation in the PR.
+    An internal crash must not be reported as exit code 1 (violations) or
+    exit code 2 (a configuration error the user caused): it gets its own
+    exit code 3.
     """
 
-    def test_internal_error_exits_two_not_one(self):
+    def test_internal_error_exits_three(self):
         self.helper.commit_file('README.md', 'hello', 'Base commit')
         self.helper.create_branch('feature')
         self.helper.commit_file('more.txt', 'content', 'Add more')
@@ -690,7 +1085,7 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
                 '--base-ref', 'main', '--head-ref', 'feature',
                 '--max-text-size-kb', '1000',
             ])
-        self.assertEqual(exit_code, 2)
+        self.assertEqual(exit_code, 3)
         self.assertIn('internal error', stderr)
         self.assertIn('RuntimeError', stderr)
 
@@ -710,7 +1105,7 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
                 '--max-text-size-kb', '1000',
             ])
 
-        self.assertEqual(exit_code, 2)
+        self.assertEqual(exit_code, 3)
         self.assertIn('::error::', stdout)
         annotation_line = next(
             line for line in stdout.splitlines() if line.startswith('::error::'))
@@ -725,24 +1120,22 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
     def test_internal_error_does_not_leave_partial_github_output_or_summary(self):
         # report() is only ever reached after the pipeline succeeds, so a
         # crash earlier in the pipeline (as simulated here) must leave
-        # GITHUB_OUTPUT / GITHUB_STEP_SUMMARY exactly as it found them --
-        # never a partially-written entry a downstream step (e.g. one
-        # gated on `if: always()`) could misread as real scan results.
+        # GITHUB_OUTPUT exactly as it found it -- never a partially-written
+        # entry a downstream step (e.g. one gated on `if: always()`) could
+        # misread as real scan results. GITHUB_STEP_SUMMARY, unlike
+        # GITHUB_OUTPUT, does get an internal-error summary appended (see
+        # test_internal_error_writes_a_job_summary below); this test only
+        # pins down GITHUB_OUTPUT.
         self.helper.commit_file('README.md', 'hello', 'Base commit')
         self.helper.create_branch('feature')
         self.helper.commit_file('more.txt', 'content', 'Add more')
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = os.path.join(tmp_dir, 'github_output')
-            summary_path = os.path.join(tmp_dir, 'github_step_summary')
-            # Pre-seed both files the way a real job would leave them
-            # before this step runs (empty, but present).
             open(output_path, 'w', encoding='utf-8').close()
-            open(summary_path, 'w', encoding='utf-8').close()
 
             env = dict(os.environ)
             env['GITHUB_OUTPUT'] = output_path
-            env['GITHUB_STEP_SUMMARY'] = summary_path
 
             with mock.patch.object(main_module, 'evaluate_blobs',
                                    side_effect=RuntimeError('boom')):
@@ -752,11 +1145,30 @@ class TestUnexpectedExceptionExitCode(GitRepoTestBase):
                         '--max-text-size-kb', '1000',
                     ])
 
-            self.assertEqual(exit_code, 2)
+            self.assertEqual(exit_code, 3)
             with open(output_path, encoding='utf-8') as handle:
                 self.assertEqual(handle.read(), '')
+
+    def test_internal_error_writes_a_job_summary(self):
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('more.txt', 'content', 'Add more')
+
+        with tempfile.TemporaryDirectory() as tmp:
+            summary_path = os.path.join(tmp, 'summary.md')
+            with mock.patch.object(main_module, 'evaluate_blobs',
+                                   side_effect=RuntimeError('boom')):
+                with mock.patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': summary_path}):
+                    exit_code, _stdout, _stderr = run_cli([
+                        '--base-ref', 'main', '--head-ref', 'feature',
+                        '--max-text-size-kb', '1000',
+                    ])
+            self.assertEqual(exit_code, 3)
             with open(summary_path, encoding='utf-8') as handle:
-                self.assertEqual(handle.read(), '')
+                summary = handle.read()
+            self.assertIn('## Repo Size Guardian', summary)
+            self.assertIn('**Status:** Internal error', summary)
+            self.assertIn('RuntimeError', summary)
 
 
 class TestConfigErrorAnnotation(GitRepoTestBase):
@@ -783,6 +1195,8 @@ class TestConfigErrorAnnotation(GitRepoTestBase):
         annotation_line = next(
             line for line in stdout.splitlines() if line.startswith('::error::'))
         self.assertIn('bad_policy.yml', annotation_line)
+        self.assertIn("this repository's repo-size-guardian setup", annotation_line)
+        self.assertIn('A maintainer needs to fix it', annotation_line)
         # Must not steer the user toward filing a bug report -- this is
         # their configuration to fix, not ours.
         self.assertNotIn('bug', annotation_line.lower())
@@ -815,7 +1229,7 @@ class TestMimeMatchingUnavailableWarning(GitRepoTestBase):
     `detect_blob_type` only ever produces a mime_type from `file --mime`;
     the content-heuristic fallback reports None, and matches_mime(None, ...)
     is always False. On a runner without `file`, a policy built around
-    `disallow.mime_types` would therefore pass every PR clean -- a false
+    `match.mime_types` would therefore pass every PR clean -- a false
     negative indistinguishable from a genuinely clean run.
     """
 
@@ -831,12 +1245,6 @@ class TestMimeMatchingUnavailableWarning(GitRepoTestBase):
             return run_cli(['--base-ref', 'main', '--head-ref', 'feature',
                             '--policy-path', 'policy.yml'])
 
-    def test_warns_when_policy_uses_disallow_mime_types(self):
-        _exit_code, stdout, _stderr = self._run_without_file_command(
-            "disallow:\n  mime_types: [\"application/x-dosexec\"]\n")
-        self.assertIn('::warning::', stdout)
-        self.assertIn('`file` command', stdout)
-
     def test_warns_when_a_rule_matches_on_mime_types(self):
         _exit_code, stdout, _stderr = self._run_without_file_command(
             "rules:\n"
@@ -844,19 +1252,91 @@ class TestMimeMatchingUnavailableWarning(GitRepoTestBase):
             "    match:\n"
             "      mime_types: [\"application/x-executable\"]\n")
         self.assertIn('::warning::', stdout)
+        self.assertIn('`file` command', stdout)
 
     def test_no_warning_when_the_policy_does_not_use_mime(self):
         _exit_code, stdout, _stderr = self._run_without_file_command(
-            "disallow:\n  extensions: [\"exe\"]\n")
+            "rules:\n  - match: {extensions: [\"exe\"]}\n    action: error\n")
         self.assertNotIn('`file` command', stdout)
 
     def test_no_warning_when_the_file_command_is_present(self):
         self.helper.create_file(
-            'policy.yml', "disallow:\n  mime_types: [\"application/x-dosexec\"]\n")
+            'policy.yml',
+            "rules:\n  - match: {mime_types: [\"application/x-dosexec\"]}\n    action: error\n")
         _exit_code, stdout, _stderr = run_cli([
             '--base-ref', 'main', '--head-ref', 'feature',
             '--policy-path', 'policy.yml'])
         self.assertNotIn('`file` command', stdout)
+
+
+class TestTransientMatchingUnavailableWarning(GitRepoTestBase):
+    """
+    `transient`/`transient_version` can never hold in scan_mode: diff, which
+    only ever sees the final net diff -- exactly what already collapses away
+    the file versions those keys exist to catch.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.helper.commit_file('README.md', 'hello', 'Base commit')
+        self.helper.create_branch('feature')
+        self.helper.commit_file('scratch.txt', 'temp', 'Add scratch')
+        self.helper.delete_file('scratch.txt', 'Remove scratch again')
+
+    def test_warns_once_in_diff_mode_when_a_rule_uses_transient(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true}\n    action: error\n"
+        ))
+        exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        # diff mode collapses the add+delete away entirely, so there is
+        # nothing left to flag -- the warning is the only signal.
+        self.assertEqual(exit_code, 0)
+        self.assertIn('::warning::', stdout)
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+        self.assertIn('Use scan_mode: history', stdout)
+
+    def test_warns_once_in_diff_mode_when_a_rule_uses_transient_version(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient_version: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+
+    def test_warns_only_once_when_a_rule_uses_both_keys(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true, transient_version: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertEqual(stdout.count("scan_mode is 'diff'"), 1)
+
+    def test_no_warning_when_the_policy_does_not_use_transient(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {extensions: [\"exe\"]}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'diff', '--policy-path', 'policy.yml',
+        ])
+        self.assertNotIn("scan_mode is 'diff'", stdout)
+
+    def test_no_warning_in_history_mode(self):
+        self.helper.create_file('policy.yml', (
+            "rules:\n  - match: {transient: true}\n    action: error\n"
+        ))
+        _exit_code, stdout, _stderr = run_cli([
+            '--base-ref', 'main', '--head-ref', 'feature',
+            '--scan-mode', 'history', '--policy-path', 'policy.yml',
+        ])
+        self.assertNotIn("scan_mode is 'diff'", stdout)
 
 
 if __name__ == '__main__':

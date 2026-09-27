@@ -1,10 +1,10 @@
 """
 Policy rule engine for repo-size-guardian.
 
-Loads and validates the optional YAML policy file, and provides the
-glob/extension/MIME matching primitives used to decide, for a given `Blob`,
-whether it is ignored, explicitly allowed, matched by a user-defined rule, or
-left to the disallow lists / global size thresholds.
+Loads and validates the optional YAML policy file -- a top-level mapping
+whose only key is `rules`, an ordered list of rules -- and provides the
+glob/extension/MIME/size matching primitives used to decide, for a given
+`Blob`, which rules match it.
 
 The policy file is entirely optional: a missing or empty file is not an
 error, but a malformed one (bad YAML, wrong types, unknown keys) is, since a
@@ -13,6 +13,7 @@ tool.
 """
 
 import os
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -20,6 +21,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import yaml
 from pathspec import GitIgnoreSpec
 
+from .formatting import format_number
 from .models import Blob
 
 # ---------------------------------------------------------------------------
@@ -27,70 +29,189 @@ from .models import Blob
 # keys" hints in error messages).
 # ---------------------------------------------------------------------------
 
-_TOP_LEVEL_KEYS = frozenset({'ignore', 'disallow', 'thresholds', 'rules', 'overrides'})
-_IGNORE_KEYS = frozenset({'globs', 'paths'})
-_DISALLOW_KEYS = frozenset({'extensions', 'globs', 'mime_types'})
-_THRESHOLDS_KEYS = frozenset({'max_text_size_kb', 'max_binary_size_kb'})
-_OVERRIDES_KEYS = frozenset({'allow_globs'})
-_RULE_KEYS = frozenset({'id', 'description', 'match', 'size_over_kb', 'action'})
-_RULE_MATCH_KEYS = frozenset({'globs', 'extensions', 'mime_types', 'binary'})
-_VALID_ACTIONS = frozenset({'warn', 'error'})
+_TOP_LEVEL_KEYS = frozenset({'rules'})
+_RULE_KEYS = frozenset({'id', 'description', 'match', 'action'})
+_RULE_MATCH_KEYS = frozenset({
+    'globs', 'extensions', 'mime_types', 'binary', 'size', 'transient', 'transient_version',
+})
+_VALID_ACTIONS = frozenset({'warn', 'error', 'stop'})
+
+#: Grammar: optional whitespace, an operator, optional whitespace, a
+#: non-negative integer or decimal, optional whitespace, a unit, optional
+#: whitespace. Case-insensitive. The two-character operators are listed
+#: before their one-character prefixes so a scanner trying alternatives in
+#: order matches ">=" before falling back to ">".
+_SIZE_CONDITION_RE = re.compile(
+    r'^\s*(?P<op>>=|<=|>|<)\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>B|KB|MB|GB)\s*$',
+    re.IGNORECASE,
+)
+_UNIT_MULTIPLIERS = {'B': 1, 'KB': 1024, 'MB': 1024 ** 2, 'GB': 1024 ** 3}
+
+#: PyYAML `context` values that mean a scanner error came from an unquoted
+#: value starting with a character YAML treats specially: `>`/`|` (block
+#: scalar indicators, what an unquoted size like `>500KB` produces) or `*`
+#: (alias indicator, what an unquoted glob like `*.md` produces).
+_QUOTING_HINT_CONTEXTS = frozenset({
+    'while scanning a block scalar',
+    'while scanning an alias',
+})
+#: Start of the PyYAML `problem` for an unknown tag, what an unquoted glob
+#: like `!keep.log` (a gitignore exclusion) produces.
+_QUOTING_HINT_TAG_PROBLEM = 'could not determine a constructor for the tag'
+_QUOTING_HINT = (
+    ' Put quotes around size values and around globs that start with \'*\', '
+    '\'!\' or \'#\', e.g. size: ">500KB" or globs: ["*.md"].'
+)
 
 
 class PolicyError(Exception):
     """Raised when a policy file is malformed: bad YAML, wrong types, or unknown keys."""
 
 
+@dataclass(frozen=True)
+class SizeCondition:
+    """
+    A parsed `match.size` condition, e.g. `">500KB"` or `"<=6MB"`.
+
+    Attributes:
+        operator: One of `'>'`, `'>='`, `'<'`, `'<='`.
+        value: The numeric value as written (e.g. `500`, `1.5`, `0`).
+        unit: One of `'B'`, `'KB'`, `'MB'`, `'GB'` (canonical uppercase,
+            regardless of how it was cased in the policy file).
+    """
+    operator: str
+    value: float
+    unit: str
+
+    @property
+    def threshold_bytes(self) -> float:
+        """The condition's threshold, converted to bytes."""
+        return self.value * _UNIT_MULTIPLIERS[self.unit]
+
+    def holds(self, size_bytes: Optional[int]) -> bool:
+        """
+        Check whether `size_bytes` satisfies this condition.
+
+        An unknown size (`None`) never satisfies a size condition -- the
+        caller (see `rule_matches`) is expected to treat that as "could not
+        evaluate this rule's size condition" rather than "did not match".
+
+        Args:
+            size_bytes: The file version's size, or None if unknown.
+
+        Returns:
+            True if `size_bytes` is not None and satisfies the condition.
+        """
+        if size_bytes is None:
+            return False
+        threshold = self.threshold_bytes
+        if self.operator == '>':
+            return size_bytes > threshold
+        if self.operator == '>=':
+            return size_bytes >= threshold
+        if self.operator == '<':
+            return size_bytes < threshold
+        return size_bytes <= threshold  # '<='
+
+    def render_threshold(self) -> str:
+        """Render the threshold the way it was written, e.g. `"50 KB"`."""
+        return '{0} {1}'.format(format_number(self.value), self.unit)
+
+
+def parse_size_condition(value: Any, context: str) -> SizeCondition:
+    """
+    Parse a policy `match.size` value into a `SizeCondition`.
+
+    Args:
+        value: The raw YAML value; only a string matching the size grammar
+            (see the module's `_SIZE_CONDITION_RE`) is accepted.
+        context: Description of where this value came from, used verbatim
+            in the error message (e.g. `"'rules[2]'.match.size"`).
+
+    Returns:
+        The parsed condition.
+
+    Raises:
+        PolicyError: If `value` is not a string, or is a string that does
+            not match the grammar (missing operator/unit, `=`/`==`, more
+            than one condition, ...).
+    """
+    if isinstance(value, str):
+        match = _SIZE_CONDITION_RE.match(value)
+        if match:
+            return SizeCondition(
+                operator=match.group('op'),
+                value=float(match.group('value')),
+                unit=match.group('unit').upper(),
+            )
+    raise PolicyError(
+        '{0} must be one condition such as ">500KB" or "<=6MB", got {1!r}'.format(context, value)
+    )
+
+
 @dataclass
 class Rule:
     """
-    A single user-defined policy rule (an entry of `rules`).
+    A single rule: either a user-defined entry of the policy's `rules`, or
+    one of the three quick-start inputs acting as a rule (see
+    `main._quick_start_rules`).
 
     Attributes:
-        id: Unique rule identifier. Required, non-empty.
-        description: Free-form human-readable description.
-        match_globs: Path globs; a blob matches if its path matches any of these.
-        match_extensions: File extensions (with or without leading dot); a
-            blob matches if its extension matches any of these.
-        match_mime_types: MIME types (subtype `*` wildcard allowed); a blob
-            matches if its detected MIME type matches any of these.
-        match_binary: If not None, an additional filter requiring
-            `blob.is_binary` to equal this value.
-        size_over_kb: If not None, the rule only produces a violation when
-            the blob's size in KB is strictly greater than this value. If
-            None, a content-match is unconditionally a violation.
-        action: Severity to report when this rule matches: 'warn' or 'error'.
+        name: The rule's name in reports: its `id` if it set one, else
+            `rules[N]` (0-based, matching the convention validation
+            messages already use). Always set.
+        id: The rule's own `id`, if it set one; None for an anonymous
+            policy rule. Always set (equal to `name`) for a quick-start
+            rule.
+        description: Free-form text shown in reports in place of the
+            default `"Matched rule '<name>'"` message. Unused by a
+            quick-start rule, which has its own fixed message.
+        match_globs / match_extensions / match_mime_types: A blob matches
+            on one of these keys if its path/extension/MIME type matches
+            any entry (OR within the list). An empty list imposes no
+            condition.
+        match_binary: If not None, an additional condition requiring
+            `blob.is_binary` to equal this value (`False` also matches an
+            undetermined type -- see `_binary_condition_holds`).
+        match_size: If not None, an additional condition on the blob's size.
+        match_transient / match_transient_version: If not None, an
+            additional condition requiring `blob.is_transient` /
+            `blob.is_transient_version` to equal this value exactly (plain
+            equality -- unlike `match_binary`, there is no "also matches
+            undetermined" case: in history mode these are always definite
+            booleans on a file version that reaches evaluation at all; see
+            `transience.py`).
+        action: What happens when every condition holds: `'warn'` or
+            `'error'` records a hit and evaluation continues to the next
+            rule; `'stop'` ends evaluation for this file version, keeping
+            whatever hits were already recorded.
+        is_input_rule: True for a rule synthesized from a quick-start input
+            rather than parsed from a policy file; affects only report
+            wording (e.g. "the `<name>` input" rather than "the policy rule
+            `<name>`").
     """
-    id: str
+    name: str
+    id: Optional[str] = None
     description: str = ""
     match_globs: List[str] = field(default_factory=list)
     match_extensions: List[str] = field(default_factory=list)
     match_mime_types: List[str] = field(default_factory=list)
     match_binary: Optional[bool] = None
-    size_over_kb: Optional[float] = None
+    match_size: Optional[SizeCondition] = None
+    match_transient: Optional[bool] = None
+    match_transient_version: Optional[bool] = None
     action: str = "error"
+    is_input_rule: bool = False
 
 
 @dataclass
 class Policy:
-    """
-    A fully parsed and validated policy.
-
-    See module docstring and `from_dict` for validation rules.
-    """
-    ignore_globs: List[str] = field(default_factory=list)
-    ignore_paths: List[str] = field(default_factory=list)
-    disallow_extensions: List[str] = field(default_factory=list)
-    disallow_globs: List[str] = field(default_factory=list)
-    disallow_mime_types: List[str] = field(default_factory=list)
-    max_text_size_kb: Optional[float] = None
-    max_binary_size_kb: Optional[float] = None
+    """A fully parsed and validated policy: an ordered list of rules."""
     rules: List[Rule] = field(default_factory=list)
-    allow_globs: List[str] = field(default_factory=list)
 
     @classmethod
     def empty(cls) -> "Policy":
-        """Return a Policy that imposes nothing (all defaults)."""
+        """Return a Policy with no rules."""
         return cls()
 
     @classmethod
@@ -108,9 +229,7 @@ class Policy:
 
         Raises:
             PolicyError: If `data` is not a mapping, contains an unknown
-                top-level or nested key, has a field of the wrong type, or
-                contains an invalid rule (missing/duplicate id, bad action,
-                negative size).
+                key, or `rules` contains an invalid entry (see `_parse_rule`).
         """
         if data is None:
             return cls.empty()
@@ -121,77 +240,29 @@ class Policy:
             )
         _check_known_keys(data, _TOP_LEVEL_KEYS, "the top level of the policy file")
 
-        policy = cls.empty()
-
-        ignore = _expect_mapping_or_none(data.get('ignore'), 'ignore')
-        if ignore is not None:
-            _check_known_keys(ignore, _IGNORE_KEYS, "'ignore'")
-            policy.ignore_globs = _expect_str_list(ignore.get('globs'), 'ignore.globs')
-            policy.ignore_paths = _expect_str_list(ignore.get('paths'), 'ignore.paths')
-
-        disallow = _expect_mapping_or_none(data.get('disallow'), 'disallow')
-        if disallow is not None:
-            _check_known_keys(disallow, _DISALLOW_KEYS, "'disallow'")
-            policy.disallow_extensions = _expect_str_list(
-                disallow.get('extensions'), 'disallow.extensions')
-            policy.disallow_globs = _expect_str_list(disallow.get('globs'), 'disallow.globs')
-            policy.disallow_mime_types = _expect_str_list(
-                disallow.get('mime_types'), 'disallow.mime_types')
-
-        thresholds = _expect_mapping_or_none(data.get('thresholds'), 'thresholds')
-        if thresholds is not None:
-            _check_known_keys(thresholds, _THRESHOLDS_KEYS, "'thresholds'")
-            policy.max_text_size_kb = _expect_nonneg_number_or_none(
-                thresholds.get('max_text_size_kb'), 'thresholds.max_text_size_kb')
-            policy.max_binary_size_kb = _expect_nonneg_number_or_none(
-                thresholds.get('max_binary_size_kb'), 'thresholds.max_binary_size_kb')
-
-        overrides = _expect_mapping_or_none(data.get('overrides'), 'overrides')
-        if overrides is not None:
-            _check_known_keys(overrides, _OVERRIDES_KEYS, "'overrides'")
-            policy.allow_globs = _expect_str_list(
-                overrides.get('allow_globs'), 'overrides.allow_globs')
-
         rules_data = data.get('rules')
-        if rules_data is not None:
-            if not isinstance(rules_data, list):
-                raise PolicyError(
-                    f"'rules' must be a list, got {_type_name(rules_data)}"
-                )
-            rules: List[Rule] = []
-            seen_ids = set()
-            for index, rule_data in enumerate(rules_data):
-                rule = _parse_rule(rule_data, index)
+        if rules_data is None:
+            return cls.empty()
+        if not isinstance(rules_data, list):
+            raise PolicyError(f"'rules' must be a list, got {_type_name(rules_data)}")
+
+        rules: List[Rule] = []
+        seen_ids = set()
+        for index, rule_data in enumerate(rules_data):
+            rule = _parse_rule(rule_data, index)
+            if rule.id is not None:
                 if rule.id in seen_ids:
                     raise PolicyError(
                         f"Duplicate rule id {rule.id!r} in 'rules' "
                         f"(rule ids must be unique)"
                     )
                 seen_ids.add(rule.id)
-                rules.append(rule)
-            policy.rules = rules
-
-        return policy
+            rules.append(rule)
+        return cls(rules=rules)
 
     def is_empty(self) -> bool:
-        """
-        Return True when this policy imposes nothing at all.
-
-        True iff there are no ignore/disallow/rules/allow_globs entries and
-        both global size thresholds are None. Used to warn the user that
-        "nothing is being enforced".
-        """
-        return (
-            not self.ignore_globs
-            and not self.ignore_paths
-            and not self.disallow_extensions
-            and not self.disallow_globs
-            and not self.disallow_mime_types
-            and not self.rules
-            and not self.allow_globs
-            and self.max_text_size_kb is None
-            and self.max_binary_size_kb is None
-        )
+        """Return True when this policy has no rules at all."""
+        return not self.rules
 
 
 def load_policy(path: Optional[str]) -> Tuple[Policy, bool]:
@@ -206,8 +277,8 @@ def load_policy(path: Optional[str]) -> Tuple[Policy, bool]:
         - `path` is None/empty, or does not name an existing regular file:
           `(Policy.empty(), False)`. This is not an error -- the policy file
           is optional.
-        - the file exists, but is empty or contains only `null`:
-          `(Policy.empty(), True)`.
+        - the file exists, but is empty, contains only `null`, or sets
+          `rules` to `null`/`[]`: `(Policy.empty(), True)`.
         - the file exists and parses to a valid policy: `(policy, True)`.
 
     Raises:
@@ -224,7 +295,12 @@ def load_policy(path: Optional[str]) -> Tuple[Policy, bool]:
     except OSError as exc:
         raise PolicyError(f"Could not read policy file '{path}': {exc}") from exc
     except yaml.YAMLError as exc:
-        raise PolicyError(f"Policy file '{path}' contains invalid YAML: {exc}") from exc
+        message = f"Policy file '{path}' contains invalid YAML: {exc}"
+        problem = getattr(exc, 'problem', None) or ''
+        if (getattr(exc, 'context', None) in _QUOTING_HINT_CONTEXTS
+                or problem.startswith(_QUOTING_HINT_TAG_PROBLEM)):
+            message += _QUOTING_HINT
+        raise PolicyError(message) from exc
 
     try:
         policy = Policy.from_dict(data)
@@ -276,7 +352,7 @@ def matches_extension(path: str, extensions: Sequence[str]) -> bool:
     Returns:
         True if `path` has an extension matching one of `extensions`.
     """
-    extension = _extension_of(path)
+    extension = extension_of(path)
     if extension is None:
         return False
     extension_lower = extension.lower()
@@ -318,58 +394,71 @@ def matches_mime(mime_type: Optional[str], mime_types: Sequence[str]) -> bool:
     return False
 
 
-def rule_matches(rule: Rule, blob: Blob) -> bool:
+def _binary_condition_holds(actual: Optional[bool], expected: bool) -> bool:
+    """
+    Check a `match.binary` condition.
+
+    `expected=True` requires a definite `True`. `expected=False` accepts
+    both a definite `False` and `None`: a file version whose type could not
+    be determined is treated as text-like for this purpose, since the
+    default (unmatched) case elsewhere in this package already does the
+    same (e.g. the quick-start `max_text_size_kb` rule, whose `match.binary`
+    is `False`).
+
+    Args:
+        actual: The blob's `is_binary` (`None` means undetermined).
+        expected: The rule's `match.binary` value.
+
+    Returns:
+        True if the condition holds.
+    """
+    if expected:
+        return actual is True
+    return actual is not True
+
+
+def rule_matches(rule: Rule, blob: Blob) -> Tuple[bool, bool]:
     """
     Check whether `rule` matches `blob`.
 
-    A rule's `match_globs` / `match_extensions` / `match_mime_types` combine
-    with OR: the blob matches on content if it matches any populated one of
-    these three lists. If none of the three are populated at all, the
-    content criterion is unconstrained (matches every blob) -- this is what
-    lets a rule like "all binaries over 100 KB" be expressed with only
-    `match_binary` and `size_over_kb` set. `match_binary`, if not None, is
-    then applied as an additional AND filter on `blob.is_binary`.
+    Every condition present on `rule` must hold (AND across keys); a key
+    with an empty list, or left at `None`, imposes no condition. Globs,
+    extensions and MIME types each combine their own list with OR (see
+    `matches_path`/`matches_extension`/`matches_mime`). Conditions are
+    checked in a fixed order and short-circuit on the first one that fails,
+    so a later condition is never even looked at once an earlier one has
+    already ruled the rule out.
 
     Args:
         rule: The rule to test.
-        blob: The blob to test.
+        blob: The file version to test.
 
     Returns:
-        True if the rule matches the blob.
+        A `(matches, size_unknown)` tuple. `size_unknown` is True exactly
+        when every other condition on `rule` held, `rule.match_size` is
+        set, and `blob.size_bytes` is None: this rule's size condition
+        could not be evaluated at all, which is what triggers the
+        "could not read the size" warning (see `evaluator.py`).
     """
-    has_content_filters = bool(
-        rule.match_globs or rule.match_extensions or rule.match_mime_types
-    )
-    if has_content_filters:
-        content_match = (
-            (bool(rule.match_globs) and matches_path(blob.path, rule.match_globs))
-            or (bool(rule.match_extensions) and matches_extension(blob.path, rule.match_extensions))
-            or (bool(rule.match_mime_types) and matches_mime(blob.mime_type, rule.match_mime_types))
-        )
-        if not content_match:
-            return False
-
-    if rule.match_binary is not None and blob.is_binary != rule.match_binary:
-        return False
-
-    return True
-
-
-def find_matching_rule(policy: Policy, blob: Blob) -> Optional[Rule]:
-    """
-    Find the first rule in `policy.rules` (declaration order) matching `blob`.
-
-    Args:
-        policy: The policy whose rules to search.
-        blob: The blob to test.
-
-    Returns:
-        The first matching Rule, or None if no rule matches.
-    """
-    for rule in policy.rules:
-        if rule_matches(rule, blob):
-            return rule
-    return None
+    if rule.match_globs and not matches_path(blob.path, rule.match_globs):
+        return False, False
+    if rule.match_extensions and not matches_extension(blob.path, rule.match_extensions):
+        return False, False
+    if rule.match_mime_types and not matches_mime(blob.mime_type, rule.match_mime_types):
+        return False, False
+    if rule.match_binary is not None and not _binary_condition_holds(blob.is_binary, rule.match_binary):
+        return False, False
+    if rule.match_size is not None:
+        if blob.size_bytes is None:
+            return False, True
+        if not rule.match_size.holds(blob.size_bytes):
+            return False, False
+    if rule.match_transient is not None and blob.is_transient != rule.match_transient:
+        return False, False
+    if (rule.match_transient_version is not None
+            and blob.is_transient_version != rule.match_transient_version):
+        return False, False
+    return True, False
 
 
 @lru_cache(maxsize=None)
@@ -378,8 +467,8 @@ def _compile_patterns(patterns: Tuple[str, ...]) -> GitIgnoreSpec:
     return GitIgnoreSpec.from_lines(patterns)
 
 
-def _extension_of(path: str) -> Optional[str]:
-    """Return the lowercase-preserving extension of `path`'s basename, or None."""
+def extension_of(path: str) -> Optional[str]:
+    """Return the case-preserved extension of `path`'s basename, or None."""
     basename = path.rsplit('/', 1)[-1]
     dot_index = basename.rfind('.')
     if dot_index <= 0:
@@ -426,22 +515,16 @@ def _expect_str_list(value: Any, context: str) -> List[str]:
     if not isinstance(value, list):
         raise PolicyError(f"{context} must be a list of strings, got {_type_name(value)}")
     for item in value:
+        if item is None:
+            raise PolicyError(
+                f"{context} must be a list of strings, but found an empty entry; "
+                f"a pattern that starts with '#' must be in quotes"
+            )
         if not isinstance(item, str):
             raise PolicyError(
                 f"{context} must be a list of strings, but found {_type_name(item)} ({item!r})"
             )
     return list(value)
-
-
-def _expect_nonneg_number_or_none(value: Any, context: str) -> Optional[float]:
-    """Validate that `value` is a non-negative number, or None/absent."""
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise PolicyError(f"{context} must be a non-negative number, got {_type_name(value)}")
-    if value < 0:
-        raise PolicyError(f"{context} must be non-negative, got {value}")
-    return float(value)
 
 
 def _parse_rule(rule_data: Any, index: int) -> Rule:
@@ -451,9 +534,10 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
         raise PolicyError(f"{context} must be a mapping, got {_type_name(rule_data)}")
     _check_known_keys(rule_data, _RULE_KEYS, context)
 
-    rule_id = rule_data.get('id')
-    if not isinstance(rule_id, str) or not rule_id:
-        raise PolicyError(f"{context} is missing a required non-empty 'id' (string)")
+    raw_id = rule_data.get('id')
+    if raw_id is not None and (not isinstance(raw_id, str) or not raw_id):
+        raise PolicyError(f"{context}.id must be a non-empty string, got {raw_id!r}")
+    name = raw_id if raw_id else f"rules[{index}]"
 
     description = rule_data.get('description', "")
     if description is None:
@@ -468,6 +552,9 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
     match_globs = _expect_str_list(match.get('globs'), f"{context}.match.globs")
     match_extensions = _expect_str_list(match.get('extensions'), f"{context}.match.extensions")
     match_mime_types = _expect_str_list(match.get('mime_types'), f"{context}.match.mime_types")
+    for key in ('globs', 'extensions', 'mime_types'):
+        if match.get(key) == []:
+            raise PolicyError(f"{context}.match.{key} must list at least one entry")
 
     match_binary = match.get('binary')
     if match_binary is not None and not isinstance(match_binary, bool):
@@ -475,8 +562,31 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
             f"{context}.match.binary must be true or false, got {_type_name(match_binary)}"
         )
 
-    size_over_kb = _expect_nonneg_number_or_none(
-        rule_data.get('size_over_kb'), f"{context}.size_over_kb")
+    match_transient = match.get('transient')
+    if match_transient is not None and not isinstance(match_transient, bool):
+        raise PolicyError(
+            f"{context}.match.transient must be true or false, got {_type_name(match_transient)}"
+        )
+
+    match_transient_version = match.get('transient_version')
+    if match_transient_version is not None and not isinstance(match_transient_version, bool):
+        raise PolicyError(
+            f"{context}.match.transient_version must be true or false, "
+            f"got {_type_name(match_transient_version)}"
+        )
+
+    match_size = None
+    if match.get('size') is not None:
+        match_size = parse_size_condition(match['size'], f"{context}.match.size")
+
+    if not (match_globs or match_extensions or match_mime_types
+            or match_binary is not None or match_size is not None
+            or match_transient is not None or match_transient_version is not None):
+        raise PolicyError(
+            f"{context}.match is required and must set at least one condition "
+            f"(globs, extensions, mime_types, binary, size, transient, or "
+            f"transient_version)"
+        )
 
     action = rule_data.get('action', 'error')
     if action not in _VALID_ACTIONS:
@@ -484,12 +594,15 @@ def _parse_rule(rule_data: Any, index: int) -> Rule:
         raise PolicyError(f"{context}.action must be one of: {accepted}; got {action!r}")
 
     return Rule(
-        id=rule_id,
+        name=name,
+        id=raw_id,
         description=description,
         match_globs=match_globs,
         match_extensions=match_extensions,
         match_mime_types=match_mime_types,
         match_binary=match_binary,
-        size_over_kb=size_over_kb,
+        match_size=match_size,
+        match_transient=match_transient,
+        match_transient_version=match_transient_version,
         action=action,
     )

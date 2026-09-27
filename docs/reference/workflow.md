@@ -8,13 +8,14 @@ All inputs are optional. An input set to an empty string uses its default.
 
 | Input | Default | Description |
 |---|---|---|
-| `max_text_size_kb` | no limit | Size limit for text files, in KB. The policy's `thresholds.max_text_size_kb` takes precedence. |
-| `max_binary_size_kb` | no limit | Size limit for binary files, in KB. The policy's `thresholds.max_binary_size_kb` takes precedence. |
-| `policy_path` | `.github/repo-size-guardian.yml` | Path to the [policy file](policy.md). If no file exists there, no policy is applied. |
+| `max_text_size_kb` | no limit | Size limit for text files, in KB. Acts as one `error` rule. See [Policy file or inputs](#policy-file-or-inputs). |
+| `max_binary_size_kb` | no limit | Size limit for binary files, in KB. Acts as one `error` rule. |
+| `disallow_extensions` | none | Extensions to disallow, separated by commas and/or whitespace, e.g. `"exe, dll, zip"` (leading dots optional). Acts as one `error` rule. |
+| `policy_path` | `.github/repo-size-guardian.yml` | Path to the [policy file](policy.md). If no file exists there, the three inputs above apply instead. |
 | `fail_on` | `error` | Which violations fail the job. `error`: only errors fail it. `any`: any violation fails it. |
 | `scan_mode` | `history` | `history` or `diff`. See [Scan modes](#scan-modes). |
 | `dedupe_blobs` | `true` | Report each file content once per path, at the earliest commit that added it. `false` reports every commit that adds it. |
-| `annotate_pr` | `true` | Add an [annotation](output.md#annotations) for each violation. |
+| `annotate_pr` | `true` | Add an [annotation](output.md#annotations) for each violating file. |
 | `max_annotations` | `10` | Maximum number of annotations. `0` means no limit. |
 | `base_ref` | from the `pull_request` event | Commit or ref to compare from. See [Choosing the commits](#choosing-the-commits). |
 | `head_ref` | from the `pull_request` event | Commit or ref to compare to. |
@@ -23,12 +24,22 @@ Sizes are in KB, where 1 KB = 1024 bytes. Numbers must be 0 or greater.
 Booleans accept `true`/`false`, `yes`/`no` and `1`/`0`. An invalid value
 stops the run with [exit code 2](output.md#exit-codes).
 
+## Policy file or inputs
+
+A [policy file](policy.md) and `disallow_extensions`/`max_text_size_kb`/
+`max_binary_size_kb` can't be combined. If a policy file exists at
+`policy_path` and any of the three is also set, the run stops with a
+configuration error before any git work. The message names the input(s) to
+remove and prints the equivalent `rules:` block to paste into the policy
+file instead.
+
 ## Outputs
 
 | Output | Description |
 |---|---|
-| `violations_found` | Number of violations, of any severity. |
-| `summary` | One line, e.g. `2 violation(s) found (1 error, 1 warn)` or `No violations found`. |
+| `violating_file_count` | Number of distinct files with at least one violation. |
+| `violation_count` | Total number of violations, of any severity. |
+| `summary` | One line, e.g. `2 violation(s) in 2 file(s) (1 error, 1 warn)` or `No violations found`. |
 
 ## Triggers
 

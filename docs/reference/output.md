@@ -6,10 +6,14 @@ What the action reports, and what its errors mean.
 
 | Place | Contains | Limit |
 |---|---|---|
-| [Job log](#job-log) | Every violation, plus the scan counts. | None |
-| [Job summary](#job-summary) | A table of violations, with hints on how to fix them. | First 100 violations |
-| [Annotations](#annotations) | One per violation, attached to the file. | `max_annotations`, and GitHub's own cap |
-| [Step outputs](workflow.md#outputs) | `violations_found` and `summary`. | None |
+| [Job log](#job-log) | Every violating file, plus the scan counts. | None |
+| [Job summary](#job-summary) | A table of violating files, with hints on how to fix them. | First 100 files |
+| [Annotations](#annotations) | One per violating file, attached to it. | `max_annotations`, and GitHub's own cap |
+| [Step outputs](workflow.md#outputs) | `violating_file_count`, `violation_count` and `summary`. | None |
+
+A file can hit more than one rule; it still appears once, at its highest
+severity, listing every rule it hit. The same path can appear twice if a
+pull request replaces one violating version of a file with another.
 
 ## Scan counts
 
@@ -31,30 +35,34 @@ A much smaller number means the wrong range was scanned: check
 
 ## Job log
 
-One line per violation:
+One line per violating file (see [above](#where-results-appear) for when a
+path can appear twice):
 
 ```
-ERROR  b1c5b3a  assets/demo.mp4  (1.4 MB)  Binary file size 1464.8 KB exceeds 200 KB limit  [rule: threshold.max_binary_size_kb]
+  WARN   7dfd83b  big.log  (58.6 KB)  Logs belong in the artifact store (58.6 KB > 50 KB)  [rule: big-log]
+  ERROR  7dfd83b  notebook.ipynb  (3 B)  Matched rule 'no-notebooks'  [rule: no-notebooks]
 ```
 
-The fields are severity, the commit that added the file, path,
-[size](policy.md#sizes), reason, and the policy entry that matched. Entry names are listed in the
-[evaluation order](policy.md#evaluation-order). In `diff` mode, the commit is
-the head commit.
+The fields are severity, the commit that introduced this version of the
+file, path, [size](policy.md#sizes), the violation message(s) (joined by
+`; ` when a file hit more than one rule), and the rule(s) that matched —
+`[rule: name]`, or `[rules: name, name]` for several. See
+[How rules are applied](policy.md#how-rules-are-applied) for why a file can
+hit more than one rule. In `diff` mode, the commit is the head commit.
 
 ## Job summary
 
-The summary shows the status, a table of violations (severity, file, size,
-reason, policy entry) and one "How to fix" hint per kind of violation. It
-lists the first 100 violations; the job log lists all of them.
+The summary shows the status, a table of violating files (severity, file,
+size, reason, rules) and one "How to fix" hint per kind of violation. It
+lists the first 100 rows; the job log lists all of them.
 
 ## Annotations
 
-Each violation becomes an `error` or `warning` annotation on its file, with
-no line number.
+Each violating file becomes an `error` or `warning` annotation, listing
+every rule it hit, with no line number.
 
-- The action adds up to `max_annotations` (default 10), then one notice
-  saying how many more were left out.
+- The action adds up to `max_annotations` (default 10) annotations, then one
+  notice saying how many more files were left out.
 - GitHub shows at most 10 error, 10 warning and 10 notice annotations per
   step, whatever `max_annotations` says.
 - An annotation appears on the "Files changed" tab only if the file is in
@@ -63,16 +71,22 @@ no line number.
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | No violation that fails the job under `fail_on`. |
-| `1` | At least one violation that fails the job under `fail_on`. |
-| `2` | The scan didn't finish: a [configuration error](#error-messages) or an [internal error](#internal-errors). |
+| Code | Meaning | Whose to fix |
+|---|---|---|
+| `0` | Scan completed; nothing fails the job. | — |
+| `1` | Scan completed; a violation fails the job under `fail_on`. | The pull request's author |
+| `2` | Configuration error: the policy file, the inputs, a policy file combined with quick-start inputs, or the workflow/checkout. No violations are reported. | The repository's maintainers |
+| `3` | Internal error: a bug in the action. | The action's maintainers |
+
+A run that exits with 2 or 3 reports no violations. The policy file and the
+inputs are checked before anything is scanned, so a broken setup fails right
+away.
 
 ## Error messages
 
 A configuration error prints `repo-size-guardian: error:` followed by one of
-these messages, and adds it as an error annotation.
+these messages, and adds it as an error annotation and a job summary saying
+this is the repository's setup to fix, not the pull request.
 
 | Message starts with | Cause | Fix |
 |---|---|---|
@@ -83,9 +97,11 @@ these messages, and adds it as an error annotation.
 | `the PR base commit … is not present in this checkout` | The base branch was force-pushed. | Re-run the workflow, or set `base_ref`. |
 | `Could not compute a merge base` | The base and head share no history in this checkout. | Set `fetch-depth: 0`; if the base branch was force-pushed, re-run the workflow. |
 | `Could not resolve ref` | `base_ref` or `head_ref` names nothing in this checkout. | Check the value. |
-| `Policy file '…' contains invalid YAML` | The policy file isn't valid YAML. | Fix the syntax. |
+| `Policy file '…' contains invalid YAML` | The policy file isn't valid YAML. An unquoted `size` value or glob gets an added hint to quote it. | Fix the syntax. |
 | `Policy file '…' is invalid` | The policy breaks a [validation](policy.md#validation) rule. | Fix the key the message names. |
 | `Could not read policy file` | The file at `policy_path` can't be read. | Check its permissions. |
+| `Policy file '…' can't be combined with the … input(s)` | A policy file exists and `disallow_extensions`/`max_text_size_kb`/`max_binary_size_kb` is also set. | Remove the input(s), or paste the printed `rules:` block into the policy file. |
+| `--disallow-extensions '…' contains no extensions` | The value had nothing left after splitting on commas and whitespace. | List at least one extension. |
 | `--max-annotations must be >= 0`, `--max-text-size-kb must be >= 0`, `--max-binary-size-kb must be >= 0` | A negative input. | Use 0 or more. |
 | `Invalid boolean value` | `dedupe_blobs` or `annotate_pr` isn't a boolean. | Use `true` or `false`. |
 | `Could not determine whether this is a shallow clone` | The working directory isn't a Git repository. | Add an `actions/checkout` step before this action. |
@@ -98,9 +114,11 @@ a line such as `error: argument --fail-on: invalid choice`. See
 
 ## Internal errors
 
-A crash inside the action prints a Python traceback and a line starting
-with `repo-size-guardian v<version>: internal error`. This is a bug in the
-action. Please [open an issue](https://github.com/technic960183/repo-size-guardian/issues)
+A crash inside the action prints a Python traceback, a line starting with
+`repo-size-guardian v<version>: internal error`, and exits 3. This is a bug
+in repo-size-guardian, not a problem with the pull request or with the
+repository's setup; a job summary says so too. Please
+[open an issue](https://github.com/technic960183/repo-size-guardian/issues)
 with the traceback and the version.
 
 ## Warnings
@@ -109,5 +127,7 @@ These print a warning annotation and don't change the exit code.
 
 | Warning | Cause |
 |---|---|
-| `repo-size-guardian is not enforcing anything` | No policy settings and no size inputs, so nothing was checked. |
+| `repo-size-guardian: no policy rules and none of disallow_extensions, max_text_size_kb, max_binary_size_kb are configured` | No policy file with rules, and none of the three quick-start inputs is set, so nothing was checked. |
 | ``your policy matches on MIME types, but the `file` command is not available`` | See [MIME types](policy.md#mime-types). |
+| `could not read the size of <path>` | A rule has a `size` condition and this file version's size couldn't be read from the checkout. See [Sizes](policy.md#sizes). |
+| `your policy matches on transient or transient_version, but scan_mode is 'diff'` | See [Transient files](policy.md#transient-files). |

@@ -78,11 +78,11 @@ and include:
 If the action exited with **code 2** and the log contains a line starting
 with `repo-size-guardian: error:` (also shown as a GitHub `::error::`
 annotation), that's a **configuration problem** — this is on your side,
-so no need to file a bug (the message explains what to fix). But if the
-log instead shows a Python traceback and a line that says **"This is a
-BUG in repo-size-guardian itself"**, please do file an issue with that
-full traceback and the version it names — that message exists specifically
-to make this case easy to report.
+so no need to file a bug (the message explains what to fix). But if it
+exited with **code 3**, the log shows a Python traceback, and a line says
+**"This is a BUG in repo-size-guardian itself"**, please do file an issue
+with that full traceback and the version it names — that message exists
+specifically to make this case easy to report.
 
 ## Pull requests
 
