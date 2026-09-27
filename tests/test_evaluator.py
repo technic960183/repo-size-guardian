@@ -353,14 +353,14 @@ class TestHasFailingViolations(unittest.TestCase):
     def test_fail_on_error_false_with_empty_violations(self):
         self.assertFalse(has_failing_violations([], 'error'))
 
-    def test_fail_on_warn_true_with_warn_violation(self):
-        self.assertTrue(has_failing_violations([self._violation('warn')], 'warn'))
+    def test_fail_on_any_true_with_warn_violation(self):
+        self.assertTrue(has_failing_violations([self._violation('warn')], 'any'))
 
-    def test_fail_on_warn_true_with_error_violation(self):
-        self.assertTrue(has_failing_violations([self._violation('error')], 'warn'))
+    def test_fail_on_any_true_with_error_violation(self):
+        self.assertTrue(has_failing_violations([self._violation('error')], 'any'))
 
-    def test_fail_on_warn_false_with_empty_violations(self):
-        self.assertFalse(has_failing_violations([], 'warn'))
+    def test_fail_on_any_false_with_empty_violations(self):
+        self.assertFalse(has_failing_violations([], 'any'))
 
     def test_mixed_violations_fail_on_error(self):
         violations = [self._violation('warn'), self._violation('warn'), self._violation('error')]

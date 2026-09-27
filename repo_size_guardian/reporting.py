@@ -20,8 +20,8 @@ from .models import Violation
 _STEP_SUMMARY_MAX_ROWS = 100
 
 #: Maps a Violation.severity value to the GitHub workflow-command keyword.
-#: 'warn' (our vocabulary, matching the `fail_on` input) maps to GitHub's
-#: own 'warning' command name.
+#: 'warn' (a rule's `action: warn`) maps to GitHub's own 'warning' command
+#: name.
 _SEVERITY_TO_ANNOTATION_COMMAND = {
     'error': 'error',
     'warn': 'warning',
