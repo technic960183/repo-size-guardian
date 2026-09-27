@@ -157,10 +157,10 @@ class TestEnumerateChangedBlobsSpawnCount(GitRepoTestBase):
 
     enumerate_changed_blobs used to spawn one extra `git rev-parse` process
     per changed file (via get_blob_sha_at_commit), on top of the one
-    `git diff-tree` per commit. Against the PRD target of 10,000 changed
-    files that is >10,000 avoidable spawns. `git diff-tree --raw` already
-    reports the post-image blob SHA on the same line as the status, so the
-    per-path rev-parse must not happen.
+    `git diff-tree` per commit. For a PR with 10,000 changed files that is
+    >10,000 avoidable spawns. `git diff-tree --raw` already reports the
+    post-image blob SHA on the same line as the status, so the per-path
+    rev-parse must not happen.
     """
 
     def _spawn_count_for_commit_adding_files(self, prefix: str, n_files: int) -> int:

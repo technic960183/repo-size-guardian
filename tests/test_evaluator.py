@@ -1,9 +1,9 @@
 """
 Test suite for the evaluator module.
 
-Covers the per-blob evaluation order from PRD §3.2 (skip rules, ignore/allow
-precedence, rule terminality, disallow lists, global thresholds), the
-`(blob_sha, path)` dedupe behavior from PRD §3.3, and `has_failing_violations`.
+Covers the per-blob evaluation order (skip rules, ignore/allow precedence,
+rule terminality, disallow lists, global thresholds), the `(blob_sha, path)`
+dedupe behavior, and `has_failing_violations`.
 """
 
 import unittest
@@ -212,9 +212,8 @@ class TestDisallowLists(unittest.TestCase):
         self.assertEqual(violations[0].category, 'size')
 
     def test_extension_precedence_over_mime_when_both_match(self):
-        # Internal precedence choice (extensions checked before globs before
-        # mime_types) since the contract does not otherwise order the three
-        # disallow lists; pinned down here so behavior stays deterministic.
+        # The disallow lists are checked in a fixed order: extensions, then
+        # globs, then mime_types.
         policy = Policy(disallow_extensions=['exe'], disallow_mime_types=['application/x-dosexec'])
         blob = make_blob(path='a.exe', mime_type='application/x-dosexec')
         violations = evaluate_blobs([blob], policy, EvaluationConfig())
@@ -300,7 +299,7 @@ class TestGlobalThresholds(unittest.TestCase):
 
 
 class TestDedupe(unittest.TestCase):
-    """PRD §3.3: dedupe on (blob_sha, path), keep the first occurrence."""
+    """Dedupe on (blob_sha, path), keep the first occurrence."""
 
     def test_same_sha_and_path_deduped_keeps_first_regardless_of_second(self):
         # First occurrence is small (no violation); second occurrence (same

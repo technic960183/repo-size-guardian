@@ -1,11 +1,10 @@
 """
 Blob evaluation against policy rules and size thresholds.
 
-Implements the evaluation order and deduplication behavior described in
-PRD §3.2 and §3.3: for each candidate blob, ignore/allow lists, policy
-rules, disallow lists, and global size thresholds are applied in a fixed,
-terminal order to produce a flat list of :class:`~repo_size_guardian.models.Violation`
-objects.
+Implements the evaluation order and deduplication behavior: for each
+candidate blob, ignore/allow lists, policy rules, disallow lists, and global
+size thresholds are applied in a fixed, terminal order to produce a flat
+list of :class:`~repo_size_guardian.models.Violation` objects.
 """
 
 from dataclasses import dataclass
@@ -49,8 +48,8 @@ def evaluate_blobs(blobs: Iterable[Blob], policy: Policy,
     """
     Evaluate a stream of blobs against a policy, producing violations.
 
-    Per-blob evaluation order (PRD §3.2), each step is terminal for the
-    blob it matches (later steps do not also run):
+    Per-blob evaluation order, each step is terminal for the blob it
+    matches (later steps do not also run):
 
     0. Skip blobs that are deletions (`blob.is_deleted`) or that carry an
        empty `blob_sha` (no content introduced).

@@ -1,11 +1,11 @@
 """
 Main entry point for repo-size-guardian.
 
-Wires the pipeline described in PRD §3: resolve the PR's base/head refs,
-compute the merge-base, enumerate the blobs introduced in that range (either
-by walking every commit, or as a single net diff), augment them with size
-and type metadata, evaluate them against the configured policy, and report
-the results (console log, GitHub annotations, job summary, step outputs).
+Wires the pipeline: resolve the PR's base/head refs, compute the merge-base,
+enumerate the blobs introduced in that range (either by walking every commit,
+or as a single net diff), augment them with size and type metadata, evaluate
+them against the configured policy, and report the results (console log,
+GitHub annotations, job summary, step outputs).
 """
 
 import argparse
@@ -490,8 +490,8 @@ def _enumerate_diff_blobs(merge_base: str, head_ref: str, head_sha: str) -> List
 
     Used for `scan_mode='diff'`: a single diff pass over the whole range,
     rather than one diff per commit. Every entry is stamped with `head_sha`
-    as its `commit_sha`, per contract (there is no single "introducing"
-    commit for a net diff).
+    as its `commit_sha`, since there is no single "introducing" commit
+    for a net diff.
 
     The older side must be the **merge-base**, not the base branch tip: a
     tip-to-head two-tree diff also reports every file the base branch
