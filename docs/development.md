@@ -95,12 +95,9 @@ Repo Size Guardian scan report
 ================================
 Commits scanned: 1  |  Blobs scanned: 1  |  Unique blobs: 1
 
-Violations (1):
-  ERROR  1336879  big_notes.txt  (2.0 KB)  Text file size 2.0 KB exceeds 1 KB limit  [rule: threshold.max_text_size_kb]
+  ERROR  1336879  big_notes.txt  (2.0 KB)  Text file size 2.0 KB exceeds 1 KB limit  [rule: max_text_size_kb]
 
-Summary:
-  By severity: 1 error
-  By category: 1 size
+1 violation(s) in 1 file(s) (1 error)
 ::error file=big_notes.txt::Text file size 2.0 KB exceeds 1 KB limit
 ```
 
@@ -118,16 +115,16 @@ cat "$GITHUB_STEP_SUMMARY"
 ```markdown
 ## Repo Size Guardian
 
-**Status:** 1 violation(s) found (1 error)  
+**Status:** 1 violation(s) in 1 file(s) (1 error)  
 Scanned 1 blob(s) across 1 commit(s) (1 unique).
 
-| Severity | File | Size | Reason | Rule |
+| Severity | File | Size | Reason | Rules |
 | --- | --- | --- | --- | --- |
-| ERROR | `big_notes.txt` | 2.0 KB | Text file size 2.0 KB exceeds 1 KB limit | `threshold.max_text_size_kb` |
+| ERROR | `big_notes.txt` | 2.0 KB | Text file size 2.0 KB exceeds 1 KB limit | `max_text_size_kb` |
 
 ### How to fix
 
-- Large text file — split it up or compress it, or raise `thresholds.max_text_size_kb` in your policy file if this size is legitimate. Deleting the file in a later commit will NOT fix this — the blob is already in this branch's history. Rewrite history instead, e.g. `git rebase -i <base>` to drop/edit the offending commit (or squash and force-push).
+- Large text file — split it up or compress it, or raise the size limit in the policy rule or input that flagged it. Deleting the file in a later commit will NOT fix this — the blob is already in this branch's history. Rewrite history instead, e.g. `git rebase -i <base>` to drop/edit the offending commit (or squash and force-push).
 ```
 
 ```bash
@@ -135,8 +132,9 @@ cat "$GITHUB_OUTPUT"
 ```
 
 ```
-violations_found=1
-summary=1 violation(s) found (1 error)
+violating_file_count=1
+violation_count=1
+summary=1 violation(s) in 1 file(s) (1 error)
 ```
 
 That's all four surfaces the action can produce, all exercised without a
