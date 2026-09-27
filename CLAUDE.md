@@ -32,6 +32,8 @@ schema, update the matching page in `docs/reference/`.
 
 ## Commits and pull requests
 
+- Name a branch after its change in short kebab-case, e.g. `docs-redesign`,
+  not a generated name like `claude/<random-words>`.
 - Commit messages have a short, informative title, with details in the body.
 - A PR description describes the change as it stands. When addressing review
   comments, keep the original description and adjust only what the change

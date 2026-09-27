@@ -32,7 +32,7 @@ def get_blob_sizes_batch(blob_shas: List[str]) -> Dict[str, int]:
     Get sizes for multiple blobs efficiently.
 
     Resolved in a single `git cat-file --batch-check` process rather than
-    one `git cat-file -s` per blob: at PRD 4's target of 10,000 files the
+    one `git cat-file -s` per blob: for a PR that touches 10,000 files the
     per-blob form spends essentially all of its time spawning processes
     (measured at ~10 ms/blob, so ~106 s for 10,000 blobs), while the batch
     form is a single spawn regardless of the count.

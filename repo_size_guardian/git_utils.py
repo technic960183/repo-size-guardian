@@ -55,7 +55,7 @@ def git_cat_file_sizes_batch(object_names: Sequence[str]) -> Dict[str, int]:
     Get the sizes of many objects with a single `git cat-file --batch-check`.
 
     One `git cat-file -s` per object costs one process spawn per object,
-    which dominates the runtime of a large PR (PRD 4 targets 10,000 files).
+    which dominates the runtime of a PR that touches thousands of files.
     `--batch-check` reads object names from stdin and writes one result
     line per input line, so the whole set costs a single process.
 

@@ -1,7 +1,7 @@
 """
 Policy rule engine for repo-size-guardian.
 
-Loads and validates the optional YAML policy file (PRD 3.2), and provides the
+Loads and validates the optional YAML policy file, and provides the
 glob/extension/MIME matching primitives used to decide, for a given `Blob`,
 whether it is ignored, explicitly allowed, matched by a user-defined rule, or
 left to the disallow lists / global size thresholds.
@@ -44,7 +44,7 @@ class PolicyError(Exception):
 @dataclass
 class Rule:
     """
-    A single user-defined policy rule (PRD 3.2 `rules[]`).
+    A single user-defined policy rule (an entry of `rules`).
 
     Attributes:
         id: Unique rule identifier. Required, non-empty.
@@ -74,7 +74,7 @@ class Rule:
 @dataclass
 class Policy:
     """
-    A fully parsed and validated policy (PRD 3.2).
+    A fully parsed and validated policy.
 
     See module docstring and `from_dict` for validation rules.
     """
@@ -239,7 +239,7 @@ def load_policy(path: Optional[str]) -> Tuple[Policy, bool]:
 #
 # We deliberately do not use `fnmatch`: its `*` crosses `/`, which is wrong
 # for repo-relative path patterns. Patterns are translated to an anchored
-# regex by hand instead. See PRD 3.2 / contract for the exact semantics.
+# regex by hand instead. See `_translate_glob` for the exact semantics.
 # ---------------------------------------------------------------------------
 
 def matches_path(path: str, patterns: Sequence[str]) -> bool:
@@ -383,7 +383,7 @@ def _translate_glob(pattern: str) -> str:
     """
     Translate one glob pattern into an anchored regex pattern string.
 
-    Rules (see contract / PRD 3.2):
+    Rules:
     - `*` matches any run of characters except `/`.
     - `?` matches exactly one character except `/`.
     - `[abc]` / `[!abc]` character classes are passed through to the regex.
