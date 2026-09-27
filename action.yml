@@ -9,6 +9,11 @@ inputs:
   max_binary_size_kb:
     description: 'Maximum size for binary files in KB'
     required: false
+  disallow_extensions:
+    description: >-
+      Extensions to disallow, separated by commas and/or whitespace, e.g.
+      "exe, dll, zip" (leading dots optional)
+    required: false
   policy_path:
     description: 'Path to policy configuration file'
     required: false
@@ -45,9 +50,12 @@ inputs:
     required: false
 
 outputs:
-  violations_found:
-    description: 'Number of violations found'
-    value: ${{ steps.scan.outputs.violations_found }}
+  violating_file_count:
+    description: 'Number of distinct files with at least one violation'
+    value: ${{ steps.scan.outputs.violating_file_count }}
+  violation_count:
+    description: 'Total number of violations found'
+    value: ${{ steps.scan.outputs.violation_count }}
   summary:
     description: 'Summary of scan results'
     value: ${{ steps.scan.outputs.summary }}
@@ -74,6 +82,7 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         INPUT_MAX_TEXT_SIZE_KB: ${{ inputs.max_text_size_kb }}
         INPUT_MAX_BINARY_SIZE_KB: ${{ inputs.max_binary_size_kb }}
+        INPUT_DISALLOW_EXTENSIONS: ${{ inputs.disallow_extensions }}
         INPUT_POLICY_PATH: ${{ inputs.policy_path }}
         INPUT_FAIL_ON: ${{ inputs.fail_on }}
         INPUT_SCAN_MODE: ${{ inputs.scan_mode }}
@@ -112,6 +121,7 @@ runs:
         add_arg --max-annotations "${INPUT_MAX_ANNOTATIONS:-}"
         add_arg --max-text-size-kb "${INPUT_MAX_TEXT_SIZE_KB:-}"
         add_arg --max-binary-size-kb "${INPUT_MAX_BINARY_SIZE_KB:-}"
+        add_arg --disallow-extensions "${INPUT_DISALLOW_EXTENSIONS:-}"
         add_arg --base-ref "${INPUT_BASE_REF:-}"
         add_arg --head-ref "${INPUT_HEAD_REF:-}"
 

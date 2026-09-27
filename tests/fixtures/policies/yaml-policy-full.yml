@@ -1,23 +1,33 @@
 # Fixture policy for the CI self-test's "YAML policy path" case
 # (.github/workflows/ci.yml, self-test job).
 #
-# Exercises three policy features together in one real scan, end to end,
-# in the actual GitHub Actions runner: `ignore.globs`, `disallow.extensions`,
-# and a per-rule `size_over_kb` threshold. This is also what proves PyYAML
-# actually installs and parses correctly as a runtime dependency -- the
-# unit tests import PyYAML directly, but never through a fresh `pip install`
-# of the packaged action the way a real consumer would.
-ignore:
-  globs:
-    - "vendor/**"
-
-disallow:
-  extensions: ["exe"]
-
+# Exercises three rule features together in one real scan, end to end, in
+# the actual GitHub Actions runner: a `stop` rule (to exclude vendored
+# files entirely), an extension match, and a per-rule `size` condition.
+# This is also what proves PyYAML actually installs and parses correctly as
+# a runtime dependency -- the unit tests import PyYAML directly, but never
+# through a fresh `pip install` of the packaged action the way a real
+# consumer would.
+#
+# The `stop` rule must come first: `stop` only skips the rules listed after
+# it, so a vendored file that also happened to match a rule above this one
+# would still be flagged.
 rules:
+  - id: ignore-vendor
+    description: "Vendored files are never checked"
+    match:
+      globs: ["vendor/**"]
+    action: stop
+
+  - id: no-executables
+    description: "Executables are never allowed"
+    match:
+      extensions: ["exe"]
+    action: error
+
   - id: big-log
     description: "Block log files over 50KB"
     match:
       extensions: ["log"]
-    size_over_kb: 50
+      size: ">50KB"
     action: error

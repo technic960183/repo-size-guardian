@@ -1,9 +1,10 @@
 """
 Test suite for rule_engine module.
 
-Covers glob matching, extension/MIME matching, rule matching
-and rule precedence, policy schema validation (including every PolicyError
-path), and the load_policy file-loading contract.
+Covers glob matching, extension/MIME matching, the size condition grammar,
+rule matching (AND across keys, OR within lists, the unknown-size signal),
+policy schema validation (including every PolicyError path), and the
+load_policy file-loading contract (including the YAML quoting hint).
 """
 
 import os
@@ -16,11 +17,13 @@ from repo_size_guardian.rule_engine import (
     Policy,
     PolicyError,
     Rule,
-    find_matching_rule,
+    SizeCondition,
+    extension_of,
     load_policy,
     matches_extension,
     matches_mime,
     matches_path,
+    parse_size_condition,
     rule_matches,
 )
 
@@ -304,6 +307,27 @@ class TestMatchesExtension(unittest.TestCase):
         self.assertFalse(matches_extension('a.py', ['ipynb', 'exe']))
 
 
+class TestExtensionOf(unittest.TestCase):
+
+    def test_simple_extension(self):
+        self.assertEqual(extension_of('a.txt'), 'txt')
+
+    def test_preserves_case(self):
+        self.assertEqual(extension_of('a.TXT'), 'TXT')
+
+    def test_no_extension(self):
+        self.assertIsNone(extension_of('Makefile'))
+
+    def test_dotfile_with_no_further_dot(self):
+        self.assertIsNone(extension_of('.gitignore'))
+
+    def test_last_segment_of_multiple_dots(self):
+        self.assertEqual(extension_of('archive.tar.gz'), 'gz')
+
+    def test_uses_basename_only(self):
+        self.assertEqual(extension_of('a/b/c.ipynb'), 'ipynb')
+
+
 # ---------------------------------------------------------------------------
 # MIME matching
 # ---------------------------------------------------------------------------
@@ -335,86 +359,240 @@ class TestMatchesMime(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# rule_matches / find_matching_rule
+# Size condition grammar (parse_size_condition / SizeCondition)
 # ---------------------------------------------------------------------------
 
-class TestRuleMatches(unittest.TestCase):
+class TestParseSizeConditionValid(unittest.TestCase):
+
+    def test_greater_than(self):
+        condition = parse_size_condition('>500KB', 'ctx')
+        self.assertEqual(condition.operator, '>')
+        self.assertEqual(condition.value, 500.0)
+        self.assertEqual(condition.unit, 'KB')
+
+    def test_greater_or_equal(self):
+        condition = parse_size_condition('>=0B', 'ctx')
+        self.assertEqual(condition.operator, '>=')
+        self.assertEqual(condition.value, 0.0)
+        self.assertEqual(condition.unit, 'B')
+
+    def test_less_than(self):
+        condition = parse_size_condition('<6MB', 'ctx')
+        self.assertEqual(condition.operator, '<')
+
+    def test_less_or_equal_with_internal_whitespace(self):
+        condition = parse_size_condition('<= 6 mb', 'ctx')
+        self.assertEqual(condition.operator, '<=')
+        self.assertEqual(condition.value, 6.0)
+        self.assertEqual(condition.unit, 'MB')
+
+    def test_leading_and_trailing_whitespace(self):
+        condition = parse_size_condition('  >500KB  ', 'ctx')
+        self.assertEqual(condition.operator, '>')
+
+    def test_decimal_value(self):
+        condition = parse_size_condition('>1.5MB', 'ctx')
+        self.assertEqual(condition.value, 1.5)
+
+    def test_case_insensitive_unit(self):
+        for text in ('>500kb', '>500Kb', '>500KB'):
+            with self.subTest(text=text):
+                self.assertEqual(parse_size_condition(text, 'ctx').unit, 'KB')
+
+    def test_gb_unit(self):
+        self.assertEqual(parse_size_condition('>1GB', 'ctx').unit, 'GB')
+
+    def test_zero_value(self):
+        self.assertEqual(parse_size_condition('>=0B', 'ctx').value, 0.0)
+
+
+class TestParseSizeConditionInvalid(unittest.TestCase):
+
+    def _assert_raises_with_example(self, value):
+        with self.assertRaises(PolicyError) as ctx:
+            parse_size_condition(value, "'rules[2]'.match.size")
+        message = str(ctx.exception)
+        self.assertIn("'rules[2]'.match.size", message)
+        self.assertIn('">500KB"', message)
+        self.assertIn('"<=6MB"', message)
+        self.assertIn(repr(value), message)
+        return message
+
+    def test_number_instead_of_string(self):
+        self._assert_raises_with_example(500)
+
+    def test_missing_unit(self):
+        self._assert_raises_with_example('>500')
+
+    def test_missing_operator(self):
+        self._assert_raises_with_example('500KB')
+
+    def test_equals_operator_rejected(self):
+        self._assert_raises_with_example('=500KB')
+
+    def test_double_equals_operator_rejected(self):
+        self._assert_raises_with_example('==500KB')
+
+    def test_two_conditions_rejected(self):
+        self._assert_raises_with_example('>500KB,<600KB')
+
+    def test_unknown_unit_rejected(self):
+        self._assert_raises_with_example('>500TB')
+
+    def test_boolean_rejected(self):
+        self._assert_raises_with_example(True)
+
+    def test_empty_string_rejected(self):
+        self._assert_raises_with_example('')
+
+
+class TestSizeConditionHolds(unittest.TestCase):
+
+    def test_unknown_size_never_holds(self):
+        condition = SizeCondition('>', 500, 'KB')
+        self.assertFalse(condition.holds(None))
+
+    def test_greater_than_boundary(self):
+        condition = SizeCondition('>', 1, 'KB')
+        self.assertFalse(condition.holds(1024))
+        self.assertTrue(condition.holds(1025))
+
+    def test_greater_or_equal_boundary(self):
+        condition = SizeCondition('>=', 1, 'KB')
+        self.assertTrue(condition.holds(1024))
+        self.assertFalse(condition.holds(1023))
+
+    def test_less_than_boundary(self):
+        condition = SizeCondition('<', 1, 'KB')
+        self.assertFalse(condition.holds(1024))
+        self.assertTrue(condition.holds(1023))
+
+    def test_less_or_equal_boundary(self):
+        condition = SizeCondition('<=', 1, 'KB')
+        self.assertTrue(condition.holds(1024))
+        self.assertFalse(condition.holds(1025))
+
+    def test_unit_conversion(self):
+        self.assertEqual(SizeCondition('>', 1, 'KB').threshold_bytes, 1024)
+        self.assertEqual(SizeCondition('>', 1, 'MB').threshold_bytes, 1024 ** 2)
+        self.assertEqual(SizeCondition('>', 1, 'GB').threshold_bytes, 1024 ** 3)
+        self.assertEqual(SizeCondition('>', 500, 'B').threshold_bytes, 500)
+
+    def test_render_threshold(self):
+        self.assertEqual(SizeCondition('>', 500, 'KB').render_threshold(), '500 KB')
+        self.assertEqual(SizeCondition('>', 1.5, 'MB').render_threshold(), '1.5 MB')
+        self.assertEqual(SizeCondition('>=', 0, 'B').render_threshold(), '0 B')
+        self.assertEqual(SizeCondition('>', 1048576, 'KB').render_threshold(), '1048576 KB')
+
+
+# ---------------------------------------------------------------------------
+# rule_matches
+# ---------------------------------------------------------------------------
+
+class TestRuleMatchesContentKeys(unittest.TestCase):
 
     def test_glob_only_rule_matches(self):
-        rule = Rule(id='r', match_globs=['**/*.secret'])
-        self.assertTrue(rule_matches(rule, make_blob('a/b.secret')))
-        self.assertFalse(rule_matches(rule, make_blob('a/b.txt')))
+        rule = Rule(name='r', match_globs=['**/*.secret'])
+        self.assertEqual(rule_matches(rule, make_blob('a/b.secret')), (True, False))
+        self.assertEqual(rule_matches(rule, make_blob('a/b.txt')), (False, False))
 
     def test_extension_only_rule_matches(self):
-        rule = Rule(id='r', match_extensions=['ipynb'])
-        self.assertTrue(rule_matches(rule, make_blob('notebook.ipynb')))
-        self.assertFalse(rule_matches(rule, make_blob('notebook.py')))
+        rule = Rule(name='r', match_extensions=['ipynb'])
+        self.assertEqual(rule_matches(rule, make_blob('notebook.ipynb'))[0], True)
+        self.assertEqual(rule_matches(rule, make_blob('notebook.py'))[0], False)
 
     def test_mime_only_rule_matches(self):
-        rule = Rule(id='r', match_mime_types=['application/*'])
-        self.assertTrue(rule_matches(rule, make_blob('a.bin', mime_type='application/zip')))
-        self.assertFalse(rule_matches(rule, make_blob('a.bin', mime_type='text/plain')))
+        rule = Rule(name='r', match_mime_types=['application/*'])
+        self.assertTrue(rule_matches(rule, make_blob('a.bin', mime_type='application/zip'))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.bin', mime_type='text/plain'))[0])
 
-    def test_content_criteria_combine_with_or(self):
-        rule = Rule(id='r', match_globs=['**/*.secret'], match_extensions=['exe'])
-        self.assertTrue(rule_matches(rule, make_blob('a.secret')))
-        self.assertTrue(rule_matches(rule, make_blob('a.exe')))
-        self.assertFalse(rule_matches(rule, make_blob('a.txt')))
+    def test_multiple_content_keys_combine_with_and(self):
+        # Unlike a single key's own OR-within-list, two different keys set
+        # on the same rule must BOTH hold.
+        rule = Rule(name='r', match_globs=['**/*.secret'], match_extensions=['secret'])
+        self.assertTrue(rule_matches(rule, make_blob('a.secret'))[0])
 
-    def test_no_content_filters_matches_every_path(self):
-        rule = Rule(id='r', match_binary=True)
-        self.assertTrue(rule_matches(rule, make_blob('anything.bin', is_binary=True)))
-        self.assertTrue(rule_matches(rule, make_blob('other/thing.dat', is_binary=True)))
+        rule2 = Rule(name='r2', match_globs=['docs/**'], match_extensions=['exe'])
+        # Matches the glob but not the extension: AND across keys means no match.
+        self.assertFalse(rule_matches(rule2, make_blob('docs/a.txt'))[0])
+        # Matches the extension but not the glob: still no match.
+        self.assertFalse(rule_matches(rule2, make_blob('other/a.exe'))[0])
+        # Matches both.
+        self.assertTrue(rule_matches(rule2, make_blob('docs/a.exe'))[0])
 
-    def test_binary_filter_true_excludes_text(self):
-        rule = Rule(id='r', match_binary=True)
-        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=False)))
+    def test_glob_list_combines_with_or(self):
+        rule = Rule(name='r', match_globs=['*.md', '*.txt'])
+        self.assertTrue(rule_matches(rule, make_blob('a.md'))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt'))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.py'))[0])
 
-    def test_binary_filter_false_excludes_binary(self):
-        rule = Rule(id='r', match_binary=False)
-        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=True)))
-        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=False)))
+    def test_empty_lists_impose_no_condition(self):
+        rule = Rule(name='r', match_binary=True)
+        self.assertTrue(rule_matches(rule, make_blob('anything.bin', is_binary=True))[0])
+        self.assertTrue(rule_matches(rule, make_blob('other/thing.dat', is_binary=True))[0])
 
-    def test_binary_filter_is_and_with_content_match(self):
-        rule = Rule(id='r', match_extensions=['bin'], match_binary=True)
-        self.assertTrue(rule_matches(rule, make_blob('a.bin', is_binary=True)))
-        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=False)))
-        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_binary=True)))
-
-    def test_no_filters_at_all_matches_everything(self):
-        rule = Rule(id='r')
-        self.assertTrue(rule_matches(rule, make_blob('anything')))
-
-    def test_binary_none_means_no_filter(self):
-        rule = Rule(id='r', match_extensions=['txt'], match_binary=None)
-        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=True)))
-        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=False)))
-        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=None)))
+    def test_no_conditions_at_all_matches_everything(self):
+        rule = Rule(name='r')
+        self.assertTrue(rule_matches(rule, make_blob('anything'))[0])
 
 
-class TestFindMatchingRule(unittest.TestCase):
+class TestRuleMatchesBinary(unittest.TestCase):
 
-    def test_returns_none_when_no_rules(self):
-        policy = Policy.empty()
-        self.assertIsNone(find_matching_rule(policy, make_blob('a.txt')))
+    def test_true_requires_definite_binary(self):
+        rule = Rule(name='r', match_binary=True)
+        self.assertTrue(rule_matches(rule, make_blob('a.bin', is_binary=True))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=False))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=None))[0])
 
-    def test_returns_none_when_nothing_matches(self):
-        policy = Policy(rules=[Rule(id='r1', match_extensions=['ipynb'])])
-        self.assertIsNone(find_matching_rule(policy, make_blob('a.txt')))
+    def test_false_also_matches_undetermined(self):
+        rule = Rule(name='r', match_binary=False)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=False))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=None))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=True))[0])
 
-    def test_first_match_wins_in_declaration_order(self):
-        rule_a = Rule(id='a', match_extensions=['bin'])
-        rule_b = Rule(id='b', match_extensions=['bin'])
-        policy = Policy(rules=[rule_a, rule_b])
-        matched = find_matching_rule(policy, make_blob('x.bin'))
-        self.assertIs(matched, rule_a)
+    def test_none_means_no_condition(self):
+        rule = Rule(name='r', match_extensions=['txt'], match_binary=None)
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=True))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=False))[0])
+        self.assertTrue(rule_matches(rule, make_blob('a.txt', is_binary=None))[0])
 
-    def test_skips_non_matching_earlier_rules(self):
-        rule_a = Rule(id='a', match_extensions=['ipynb'])
-        rule_b = Rule(id='b', match_extensions=['bin'])
-        policy = Policy(rules=[rule_a, rule_b])
-        matched = find_matching_rule(policy, make_blob('x.bin'))
-        self.assertIs(matched, rule_b)
+    def test_binary_is_and_with_content_match(self):
+        rule = Rule(name='r', match_extensions=['bin'], match_binary=True)
+        self.assertTrue(rule_matches(rule, make_blob('a.bin', is_binary=True))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.bin', is_binary=False))[0])
+        self.assertFalse(rule_matches(rule, make_blob('a.txt', is_binary=True))[0])
+
+
+class TestRuleMatchesSize(unittest.TestCase):
+
+    def test_size_condition_must_hold(self):
+        rule = Rule(name='r', match_size=SizeCondition('>', 50, 'KB'))
+        self.assertEqual(rule_matches(rule, make_blob(
+            'a.log', size_bytes=60 * 1024)), (True, False))
+        self.assertEqual(rule_matches(rule, make_blob(
+            'a.log', size_bytes=10 * 1024)), (False, False))
+
+    def test_size_is_and_with_other_keys(self):
+        rule = Rule(name='r', match_extensions=['log'], match_size=SizeCondition('>', 50, 'KB'))
+        # Extension matches, size does not: no match, and size WAS evaluated
+        # (blob.size_bytes is known), so this is not the "unknown size" case.
+        self.assertEqual(
+            rule_matches(rule, make_blob('a.log', size_bytes=10 * 1024)), (False, False))
+        # Size matches, extension does not: never reaches the size check.
+        self.assertEqual(
+            rule_matches(rule, make_blob('a.txt', size_bytes=60 * 1024)), (False, False))
+
+    def test_unknown_size_is_reported_only_when_size_would_be_checked(self):
+        rule = Rule(name='r', match_extensions=['log'], match_size=SizeCondition('>', 50, 'KB'))
+        # Every earlier condition holds and the size is unknown: reported.
+        self.assertEqual(rule_matches(rule, make_blob('a.log', size_bytes=None)), (False, True))
+        # The extension does not match, so the size condition is never
+        # reached at all: not reported.
+        self.assertEqual(rule_matches(rule, make_blob('a.txt', size_bytes=None)), (False, False))
+
+    def test_no_size_condition_never_reports_unknown_size(self):
+        rule = Rule(name='r', match_extensions=['log'])
+        self.assertEqual(rule_matches(rule, make_blob('a.log', size_bytes=None)), (True, False))
 
 
 # ---------------------------------------------------------------------------
@@ -426,32 +604,8 @@ class TestPolicyIsEmpty(unittest.TestCase):
     def test_default_policy_is_empty(self):
         self.assertTrue(Policy.empty().is_empty())
 
-    def test_ignore_globs_makes_non_empty(self):
-        self.assertFalse(Policy(ignore_globs=['docs/**']).is_empty())
-
-    def test_ignore_paths_makes_non_empty(self):
-        self.assertFalse(Policy(ignore_paths=['a.txt']).is_empty())
-
-    def test_disallow_extensions_makes_non_empty(self):
-        self.assertFalse(Policy(disallow_extensions=['exe']).is_empty())
-
-    def test_disallow_globs_makes_non_empty(self):
-        self.assertFalse(Policy(disallow_globs=['**/*.secret']).is_empty())
-
-    def test_disallow_mime_types_makes_non_empty(self):
-        self.assertFalse(Policy(disallow_mime_types=['application/x-dosexec']).is_empty())
-
-    def test_max_text_size_kb_makes_non_empty(self):
-        self.assertFalse(Policy(max_text_size_kb=500).is_empty())
-
-    def test_max_binary_size_kb_makes_non_empty(self):
-        self.assertFalse(Policy(max_binary_size_kb=100).is_empty())
-
     def test_rules_makes_non_empty(self):
-        self.assertFalse(Policy(rules=[Rule(id='r')]).is_empty())
-
-    def test_allow_globs_makes_non_empty(self):
-        self.assertFalse(Policy(allow_globs=['docs/**']).is_empty())
+        self.assertFalse(Policy(rules=[Rule(name='r')]).is_empty())
 
 
 # ---------------------------------------------------------------------------
@@ -468,80 +622,80 @@ class TestPolicyFromDictValid(unittest.TestCase):
         policy = Policy.from_dict({})
         self.assertTrue(policy.is_empty())
 
+    def test_rules_null_yields_empty_policy(self):
+        self.assertTrue(Policy.from_dict({'rules': None}).is_empty())
+
+    def test_rules_empty_list_yields_empty_policy(self):
+        self.assertTrue(Policy.from_dict({'rules': []}).is_empty())
+
     def test_full_policy_parses_all_fields(self):
         data = {
-            'ignore': {
-                'globs': ['docs/**', '**/*.md'],
-                'paths': ['vendor/exact.bin'],
-            },
-            'disallow': {
-                'extensions': ['ipynb', 'exe'],
-                'globs': ['**/*.secret'],
-                'mime_types': ['application/x-dosexec'],
-            },
-            'thresholds': {
-                'max_text_size_kb': 500,
-                'max_binary_size_kb': 100,
-            },
             'rules': [
                 {
                     'id': 'large-binaries',
                     'description': 'Block binaries over 100 KB',
-                    'match': {'binary': True},
-                    'size_over_kb': 100,
+                    'match': {'binary': True, 'size': '>100KB'},
                     'action': 'error',
                 },
                 {
                     'id': 'large-text-warn',
-                    'match': {'binary': False},
-                    'size_over_kb': 500,
+                    'match': {'binary': False, 'size': '>500KB'},
                     'action': 'warn',
                 },
+                {
+                    'match': {'globs': ['vendor/**']},
+                    'action': 'stop',
+                },
             ],
-            'overrides': {
-                'allow_globs': ['docs/allowed-large.bin'],
-            },
         }
         policy = Policy.from_dict(data)
-        self.assertEqual(policy.ignore_globs, ['docs/**', '**/*.md'])
-        self.assertEqual(policy.ignore_paths, ['vendor/exact.bin'])
-        self.assertEqual(policy.disallow_extensions, ['ipynb', 'exe'])
-        self.assertEqual(policy.disallow_globs, ['**/*.secret'])
-        self.assertEqual(policy.disallow_mime_types, ['application/x-dosexec'])
-        self.assertEqual(policy.max_text_size_kb, 500.0)
-        self.assertEqual(policy.max_binary_size_kb, 100.0)
-        self.assertEqual(policy.allow_globs, ['docs/allowed-large.bin'])
-        self.assertEqual(len(policy.rules), 2)
-        self.assertEqual(policy.rules[0].id, 'large-binaries')
-        self.assertEqual(policy.rules[0].match_binary, True)
-        self.assertEqual(policy.rules[0].size_over_kb, 100.0)
-        self.assertEqual(policy.rules[0].action, 'error')
-        self.assertEqual(policy.rules[1].id, 'large-text-warn')
-        self.assertEqual(policy.rules[1].action, 'warn')
+        self.assertEqual(len(policy.rules), 3)
+
+        first = policy.rules[0]
+        self.assertEqual(first.name, 'large-binaries')
+        self.assertEqual(first.id, 'large-binaries')
+        self.assertEqual(first.description, 'Block binaries over 100 KB')
+        self.assertEqual(first.match_binary, True)
+        self.assertEqual(first.match_size.operator, '>')
+        self.assertEqual(first.match_size.value, 100.0)
+        self.assertEqual(first.match_size.unit, 'KB')
+        self.assertEqual(first.action, 'error')
+
+        second = policy.rules[1]
+        self.assertEqual(second.name, 'large-text-warn')
+        self.assertEqual(second.action, 'warn')
+
+        third = policy.rules[2]
+        self.assertIsNone(third.id)
+        self.assertEqual(third.name, 'rules[2]')
+        self.assertEqual(third.action, 'stop')
         self.assertFalse(policy.is_empty())
 
     def test_rule_defaults(self):
-        data = {'rules': [{'id': 'only-id'}]}
+        data = {'rules': [{'id': 'only-id', 'match': {'globs': ['*.md']}}]}
         policy = Policy.from_dict(data)
         rule = policy.rules[0]
         self.assertEqual(rule.description, '')
-        self.assertEqual(rule.match_globs, [])
+        self.assertEqual(rule.match_globs, ['*.md'])
         self.assertEqual(rule.match_extensions, [])
         self.assertEqual(rule.match_mime_types, [])
         self.assertIsNone(rule.match_binary)
-        self.assertIsNone(rule.size_over_kb)
+        self.assertIsNone(rule.match_size)
         self.assertEqual(rule.action, 'error')
 
-    def test_zero_size_is_valid(self):
-        data = {'thresholds': {'max_text_size_kb': 0}}
+    def test_anonymous_rules_get_index_based_names(self):
+        data = {'rules': [
+            {'match': {'globs': ['*.a']}},
+            {'match': {'globs': ['*.b']}},
+        ]}
         policy = Policy.from_dict(data)
-        self.assertEqual(policy.max_text_size_kb, 0.0)
+        self.assertEqual(policy.rules[0].name, 'rules[0]')
+        self.assertEqual(policy.rules[1].name, 'rules[1]')
 
-    def test_null_sections_are_treated_as_absent(self):
-        data = {'ignore': None, 'disallow': None, 'thresholds': None,
-                'rules': None, 'overrides': None}
+    def test_stop_action_is_valid(self):
+        data = {'rules': [{'match': {'globs': ['vendor/**']}, 'action': 'stop'}]}
         policy = Policy.from_dict(data)
-        self.assertTrue(policy.is_empty())
+        self.assertEqual(policy.rules[0].action, 'stop')
 
 
 # ---------------------------------------------------------------------------
@@ -568,45 +722,44 @@ class TestPolicyFromDictErrors(unittest.TestCase):
         self.assertPolicyErrorMentions(42, 'mapping')
 
     def test_unknown_top_level_key(self):
-        message = self.assertPolicyErrorMentions(
-            {'triggers': []}, 'triggers')
-        for key in ('ignore', 'disallow', 'thresholds', 'rules', 'overrides'):
-            self.assertIn(key, message)
+        self.assertPolicyErrorMentions({'ignore': {}}, 'ignore', 'rules')
 
-    def test_unknown_key_in_ignore(self):
+    def test_empty_list_condition(self):
         self.assertPolicyErrorMentions(
-            {'ignore': {'globz': ['a']}}, 'globz', 'globs', 'paths')
+            {'rules': [{'match': {'globs': []}}]}, "'rules[0]'.match.globs", 'at least one entry')
 
-    def test_unknown_key_in_disallow(self):
+    def test_empty_list_beside_another_condition(self):
         self.assertPolicyErrorMentions(
-            {'disallow': {'exts': ['a']}}, 'exts', 'extensions')
+            {'rules': [{'match': {'extensions': [], 'binary': True}}]},
+            "'rules[0]'.match.extensions", 'at least one entry')
 
-    def test_unknown_key_in_thresholds(self):
+    def test_match_with_only_null_conditions(self):
         self.assertPolicyErrorMentions(
-            {'thresholds': {'max_size_kb': 1}}, 'max_size_kb')
+            {'rules': [{'match': {'binary': None, 'size': None}}]},
+            "'rules[0]'.match", 'at least one condition')
 
-    def test_unknown_key_in_overrides(self):
+    def test_null_glob_entry_points_at_quoting(self):
+        # An unquoted "#pattern" list item is a YAML comment, leaving null.
         self.assertPolicyErrorMentions(
-            {'overrides': {'allowlist': []}}, 'allowlist', 'allow_globs')
+            {'rules': [{'match': {'globs': ['*.log', None]}}]},
+            "'rules[0]'.match.globs", "starts with '#' must be in quotes")
 
     def test_unknown_key_in_rule(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'severity': 'error'}]}, 'severity', 'action')
+            {'rules': [{'match': {'globs': ['*.a']}, 'severity': 'error'}]}, 'severity', 'action')
 
     def test_unknown_key_in_rule_match(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'match': {'ext': ['py']}}]}, 'ext', 'extensions')
+            {'rules': [{'match': {'ext': ['py']}}]}, 'ext', 'extensions')
 
-    def test_ignore_not_a_mapping(self):
-        self.assertPolicyErrorMentions({'ignore': ['docs/**']}, 'mapping')
-
-    def test_disallow_extensions_wrong_type_string_instead_of_list(self):
+    def test_transient_match_key_rejected_as_unknown(self):
+        # `transient`/`transient_version` are not accepted yet.
         self.assertPolicyErrorMentions(
-            {'disallow': {'extensions': 'ipynb'}}, 'disallow.extensions', 'list')
+            {'rules': [{'match': {'transient': True}}]}, 'transient')
 
-    def test_ignore_globs_list_with_non_string_item(self):
+    def test_transient_version_match_key_rejected_as_unknown(self):
         self.assertPolicyErrorMentions(
-            {'ignore': {'globs': ['a', 123]}}, 'ignore.globs')
+            {'rules': [{'match': {'transient_version': True}}]}, 'transient_version')
 
     def test_rules_not_a_list(self):
         self.assertPolicyErrorMentions({'rules': {'id': 'r'}}, 'rules', 'list')
@@ -614,51 +767,72 @@ class TestPolicyFromDictErrors(unittest.TestCase):
     def test_rule_not_a_mapping(self):
         self.assertPolicyErrorMentions({'rules': ['just-a-string']}, 'rules[0]', 'mapping')
 
-    def test_rule_missing_id(self):
-        self.assertPolicyErrorMentions({'rules': [{'action': 'warn'}]}, 'id')
+    def test_rule_missing_match(self):
+        self.assertPolicyErrorMentions({'rules': [{'id': 'r'}]}, 'match')
+
+    def test_rule_null_match(self):
+        self.assertPolicyErrorMentions({'rules': [{'match': None}]}, 'match')
+
+    def test_rule_empty_match(self):
+        self.assertPolicyErrorMentions({'rules': [{'match': {}}]}, 'match')
+
+    def test_rule_match_not_a_mapping(self):
+        self.assertPolicyErrorMentions({'rules': [{'match': ['binary']}]}, 'match', 'mapping')
 
     def test_rule_empty_id(self):
-        self.assertPolicyErrorMentions({'rules': [{'id': ''}]}, 'id')
+        self.assertPolicyErrorMentions(
+            {'rules': [{'id': '', 'match': {'globs': ['*.a']}}]}, 'id')
 
     def test_rule_non_string_id(self):
-        self.assertPolicyErrorMentions({'rules': [{'id': 123}]}, 'id')
+        self.assertPolicyErrorMentions(
+            {'rules': [{'id': 123, 'match': {'globs': ['*.a']}}]}, 'id')
 
     def test_duplicate_rule_ids(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'dup'}, {'id': 'dup'}]}, 'dup', 'Duplicate')
+            {'rules': [
+                {'id': 'dup', 'match': {'globs': ['*.a']}},
+                {'id': 'dup', 'match': {'globs': ['*.b']}},
+            ]}, 'dup', 'Duplicate')
+
+    def test_two_anonymous_rules_are_not_duplicates(self):
+        # Only rules that SET an id participate in the uniqueness check.
+        policy = Policy.from_dict({'rules': [
+            {'match': {'globs': ['*.a']}},
+            {'match': {'globs': ['*.b']}},
+        ]})
+        self.assertEqual(len(policy.rules), 2)
 
     def test_invalid_action_value(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'action': 'critical'}]}, 'action', 'critical')
-
-    def test_negative_threshold_size(self):
-        self.assertPolicyErrorMentions(
-            {'thresholds': {'max_text_size_kb': -1}}, 'thresholds.max_text_size_kb')
-
-    def test_negative_rule_size(self):
-        self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'size_over_kb': -5}]}, 'size_over_kb')
-
-    def test_non_numeric_size(self):
-        self.assertPolicyErrorMentions(
-            {'thresholds': {'max_text_size_kb': 'big'}}, 'thresholds.max_text_size_kb')
-
-    def test_boolean_size_rejected(self):
-        # bool is a subclass of int in Python; must not silently pass as a size.
-        self.assertPolicyErrorMentions(
-            {'thresholds': {'max_text_size_kb': True}}, 'thresholds.max_text_size_kb')
+            {'rules': [{'match': {'globs': ['*.a']}, 'action': 'critical'}]}, 'action', 'critical')
 
     def test_rule_match_binary_wrong_type(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'match': {'binary': 'yes'}}]}, 'match.binary')
-
-    def test_rule_match_not_a_mapping(self):
-        self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'match': ['binary']}]}, 'match', 'mapping')
+            {'rules': [{'match': {'binary': 'yes'}}]}, 'match.binary')
 
     def test_rule_description_wrong_type(self):
         self.assertPolicyErrorMentions(
-            {'rules': [{'id': 'r', 'description': 123}]}, 'description')
+            {'rules': [{'description': 123, 'match': {'globs': ['*.a']}}]}, 'description')
+
+    def test_rule_size_number_instead_of_string(self):
+        message = self.assertPolicyErrorMentions(
+            {'rules': [{'match': {'size': 500}}]},
+            "'rules[0]'.match.size", '">500KB"', '"<=6MB"')
+        self.assertIn('500', message)
+
+    def test_rule_size_missing_unit(self):
+        self.assertPolicyErrorMentions({'rules': [{'match': {'size': '>500'}}]}, 'match.size')
+
+    def test_rule_size_equals_operator_rejected(self):
+        self.assertPolicyErrorMentions({'rules': [{'match': {'size': '=500KB'}}]}, 'match.size')
+
+    def test_globs_list_with_non_string_item(self):
+        self.assertPolicyErrorMentions(
+            {'rules': [{'match': {'globs': ['a', 123]}}]}, 'match.globs')
+
+    def test_extensions_wrong_type_string_instead_of_list(self):
+        self.assertPolicyErrorMentions(
+            {'rules': [{'match': {'extensions': 'ipynb'}}]}, 'match.extensions', 'list')
 
 
 # ---------------------------------------------------------------------------
@@ -724,32 +898,21 @@ class TestLoadPolicy(unittest.TestCase):
 
     def test_valid_file(self):
         path = self._write('policy.yml', (
-            "ignore:\n"
-            "  globs:\n"
-            "    - 'docs/**'\n"
-            "disallow:\n"
-            "  extensions: ['ipynb', 'exe']\n"
-            "thresholds:\n"
-            "  max_text_size_kb: 500\n"
-            "  max_binary_size_kb: 100\n"
             "rules:\n"
             "  - id: large-binaries\n"
             "    match:\n"
             "      binary: true\n"
-            "    size_over_kb: 100\n"
+            "      size: \">100KB\"\n"
             "    action: error\n"
         ))
         policy, found = load_policy(path)
         self.assertTrue(found)
-        self.assertEqual(policy.ignore_globs, ['docs/**'])
-        self.assertEqual(policy.disallow_extensions, ['ipynb', 'exe'])
-        self.assertEqual(policy.max_text_size_kb, 500.0)
-        self.assertEqual(policy.max_binary_size_kb, 100.0)
         self.assertEqual(len(policy.rules), 1)
         self.assertEqual(policy.rules[0].id, 'large-binaries')
+        self.assertEqual(policy.rules[0].match_size.value, 100.0)
 
     def test_malformed_yaml_raises_policy_error_naming_path(self):
-        path = self._write('bad.yml', 'ignore: [unclosed\n')
+        path = self._write('bad.yml', 'rules: [unclosed\n')
         with self.assertRaises(PolicyError) as ctx:
             load_policy(path)
         self.assertIn(path, str(ctx.exception))
@@ -769,12 +932,57 @@ class TestLoadPolicy(unittest.TestCase):
         self.assertIn(path, str(ctx.exception))
 
     def test_wrong_type_raises_policy_error_naming_path(self):
-        path = self._write('wrong_type.yml', 'disallow:\n  extensions: "ipynb"\n')
+        path = self._write('wrong_type.yml', 'rules:\n  - match: {extensions: "ipynb"}\n')
         with self.assertRaises(PolicyError) as ctx:
             load_policy(path)
         message = str(ctx.exception)
         self.assertIn(path, message)
-        self.assertIn('disallow.extensions', message)
+        self.assertIn('match.extensions', message)
+
+    def test_quoting_hint_for_unquoted_size(self):
+        # An unquoted ">500KB" is parsed by YAML as an (invalid) block
+        # scalar header, not a plain string.
+        path = self._write('unquoted_size.yml', (
+            "rules:\n"
+            "  - match:\n"
+            "      size: >500KB\n"
+        ))
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        message = str(ctx.exception)
+        self.assertIn('contains invalid YAML', message)
+        self.assertIn('Put quotes around size values', message)
+        self.assertIn('size: ">500KB"', message)
+        self.assertIn('globs: ["*.md"]', message)
+
+    def test_quoting_hint_for_unquoted_glob_star(self):
+        # An unquoted "*.md" is parsed by YAML as an alias reference.
+        path = self._write('unquoted_glob.yml', (
+            "rules:\n"
+            "  - match: {globs: [*.md]}\n"
+        ))
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        self.assertIn('Put quotes around size values', str(ctx.exception))
+
+    def test_quoting_hint_for_unquoted_glob_exclamation(self):
+        # An unquoted "!keep.log" is parsed by YAML as a tag.
+        path = self._write('unquoted_negation.yml', (
+            "rules:\n"
+            "  - match:\n"
+            "      globs:\n"
+            "        - '*.log'\n"
+            "        - !keep.log\n"
+        ))
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        self.assertIn("start with '*', '!' or '#'", str(ctx.exception))
+
+    def test_no_quoting_hint_for_an_unrelated_yaml_error(self):
+        path = self._write('other_bad.yml', 'rules: [unclosed\n')
+        with self.assertRaises(PolicyError) as ctx:
+            load_policy(path)
+        self.assertNotIn('Put quotes around size values', str(ctx.exception))
 
 
 if __name__ == '__main__':

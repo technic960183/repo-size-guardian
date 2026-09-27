@@ -164,7 +164,7 @@ jobs:
         git commit --allow-empty -m "fixture: empty base"
 
         # Scenario 1 -- clean scan: one small, unremarkable text file.
-        # Expected: exit 0, violations_found == 0.
+        # Expected: exit 0, violation_count == 0.
         git checkout -b fixture/clean fixture/base
         cp "${FIXTURES}/clean-notes.txt" notes.txt
         git add notes.txt
@@ -172,7 +172,7 @@ jobs:
 
         # Scenario 2 -- oversized binary: 300 KiB of random bytes, over a
         # 200 KB max_binary_size_kb threshold. Expected: exit 1,
-        # violations_found > 0, data/big.bin named in the job summary. This
+        # violation_count > 0, data/big.bin named in the job summary. This
         # is also the vehicle for the critical outputs-survive-failure
         # check below.
         git checkout -b fixture/oversized-binary fixture/base
@@ -182,7 +182,7 @@ jobs:
         git commit -q -m "fixture: oversized binary"
 
         # Scenario 3 -- a single warn-severity rule match: a 58.6 KB log
-        # file against a rule with `size_over_kb: 50` and `action: warn`.
+        # file against a rule matching `size: ">50KB"` with `action: warn`.
         # Run twice downstream with different `fail_on` values against this
         # exact same commit, to prove `fail_on` alone flips the exit code
         # without changing what was found.
@@ -193,15 +193,15 @@ jobs:
         git add .github/repo-size-guardian.yml output.log
         git commit -q -m "fixture: warn-severity rule + violating log file"
 
-        # Scenario 4 -- the full YAML policy path in one real scan:
-        # ignore.globs (vendor/** hides a disallowed-and-oversized file
-        # entirely), disallow.extensions (a small .exe is still blocked
-        # regardless of size), and a per-rule size_over_kb threshold (a
-        # 58.6 KB log is blocked, a 9.8 KB one is not). This is also what
-        # proves PyYAML installs and parses correctly through a real,
-        # from-scratch `pip install` of the packaged action -- the unit
-        # tests exercise the YAML parsing code directly, but never through
-        # the actual install path a consumer goes through.
+        # Scenario 4 -- the full YAML policy path in one real scan: a `stop`
+        # rule (vendor/** hides a disallowed-and-oversized file entirely),
+        # an extension match (a small .exe is still blocked regardless of
+        # size), and a per-rule size condition (a 58.6 KB log is blocked, a
+        # 9.8 KB one is not). This is also what proves PyYAML installs and
+        # parses correctly through a real, from-scratch `pip install` of
+        # the packaged action -- the unit tests exercise the YAML parsing
+        # code directly, but never through the actual install path a
+        # consumer goes through.
         git checkout -b fixture/yaml-policy fixture/base
         mkdir -p .github vendor
         cp "${FIXTURES}/policies/yaml-policy-full.yml" .github/repo-size-guardian.yml
@@ -210,7 +210,7 @@ jobs:
         head -c 60000 /dev/zero | tr '\0' 'y' > app.log
         head -c 10000 /dev/zero | tr '\0' 'z' > app-small.log
         git add .github/repo-size-guardian.yml vendor blocked.exe app.log app-small.log
-        git commit -q -m "fixture: yaml policy (ignore/disallow/per-rule threshold)"
+        git commit -q -m "fixture: yaml policy (stop rule, extension, per-rule size)"
 
         # Scenario 5 -- a malformed (unparsable) policy file. Expected:
         # exit 2 (EXIT_CONFIG_ERROR), which must stay distinguishable from
@@ -295,19 +295,19 @@ jobs:
         max_binary_size_kb: 200
         fail_on: error
 
-    - name: "Scenario 1: assert exit 0 and violations_found == 0"
+    - name: "Scenario 1: assert exit 0 and violation_count == 0"
       env:
         OUTCOME: ${{ steps.scan_clean.outcome }}
-        VIOLATIONS: ${{ steps.scan_clean.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_clean.outputs.violation_count }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS'"
         if [ "$OUTCOME" != "success" ]; then
           echo "::error::expected the clean-scan scenario to pass, but outcome was '$OUTCOME'"
           exit 1
         fi
         if [ "$VIOLATIONS" != "0" ]; then
-          echo "::error::expected violations_found=0 for a clean scan, got '$VIOLATIONS'"
+          echo "::error::expected violation_count=0 for a clean scan, got '$VIOLATIONS'"
           exit 1
         fi
 
@@ -329,11 +329,11 @@ jobs:
     - name: "Scenario 2 [CRITICAL]: violation detected, and outputs survive the failure"
       env:
         OUTCOME: ${{ steps.scan_oversized.outcome }}
-        VIOLATIONS: ${{ steps.scan_oversized.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_oversized.outputs.violation_count }}
         SUMMARY: ${{ steps.scan_oversized.outputs.summary }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS' summary='$SUMMARY'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS' summary='$SUMMARY'"
 
         # A step that was SUPPOSED to fail must actually have failed --
         # otherwise this whole scenario (and the critical check below it)
@@ -344,24 +344,24 @@ jobs:
         fi
 
         # THE CRITICAL CHECK. repo_size_guardian/main.py writes
-        # violations_found/summary to $GITHUB_OUTPUT and only THEN returns
+        # violation_count/summary to $GITHUB_OUTPUT and only THEN returns
         # exit code 1 -- that half is proven by the unit tests and by local
         # verification against the real CLI. What has never been proven is
         # whether the Actions RUNNER still relays a FAILED step's
         # $GITHUB_OUTPUT into steps.<id>.outputs, and whether that survives
         # being re-exposed through a composite action's own `outputs:`
-        # mapping (action.yml's violations_found/summary both read
+        # mapping (action.yml's violation_count/summary both read
         # steps.scan.outputs.*, and the internal "scan" step has no
         # continue-on-error of its own). If the answer to either is "no",
         # these two outputs are silently empty on every failing run, and
-        # any consumer workflow's `if: steps.x.outputs.violations_found > 0`
+        # any consumer workflow's `if: steps.x.outputs.violation_count > 0`
         # is dead code that has never once fired.
         if [ -z "$VIOLATIONS" ] || [ "$VIOLATIONS" = "0" ]; then
-          echo "::error::CRITICAL: violations_found was empty/zero on a FAILED scan step (got '$VIOLATIONS'). GITHUB_OUTPUT written by a failing composite-action step is not reaching steps.<id>.outputs on this runner -- violations_found/summary are broken for every consumer that branches on them after a failing scan."
+          echo "::error::CRITICAL: violation_count was empty/zero on a FAILED scan step (got '$VIOLATIONS'). GITHUB_OUTPUT written by a failing composite-action step is not reaching steps.<id>.outputs on this runner -- violation_count/summary are broken for every consumer that branches on them after a failing scan."
           exit 1
         fi
         if [ -z "$SUMMARY" ]; then
-          echo "::error::CRITICAL: summary was empty on a FAILED scan step. Same failure mode as violations_found above."
+          echo "::error::CRITICAL: summary was empty on a FAILED scan step. Same failure mode as violation_count above."
           exit 1
         fi
         echo "OK: composite-action outputs propagate correctly through a failing, continue-on-error step."
@@ -406,16 +406,17 @@ jobs:
     - name: "Scenario 3a: assert exit 1"
       env:
         OUTCOME: ${{ steps.scan_warn_strict.outcome }}
-        VIOLATIONS: ${{ steps.scan_warn_strict.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_warn_strict.outputs.violation_count }}
+        FILES: ${{ steps.scan_warn_strict.outputs.violating_file_count }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS' violating_file_count='$FILES'"
         if [ "$OUTCOME" != "failure" ]; then
           echo "::error::expected fail_on=any to fail on a warn-severity violation, but outcome was '$OUTCOME'"
           exit 1
         fi
-        if [ "$VIOLATIONS" != "1" ]; then
-          echo "::error::expected exactly 1 violation, got '$VIOLATIONS'"
+        if [ "$VIOLATIONS" != "1" ] || [ "$FILES" != "1" ]; then
+          echo "::error::expected exactly 1 violation in 1 file, got violation_count='$VIOLATIONS' violating_file_count='$FILES'"
           exit 1
         fi
 
@@ -431,16 +432,16 @@ jobs:
     - name: "Scenario 3b: assert exit 0, same violation still counted"
       env:
         OUTCOME: ${{ steps.scan_warn_lenient.outcome }}
-        VIOLATIONS: ${{ steps.scan_warn_lenient.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_warn_lenient.outputs.violation_count }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS'"
         if [ "$OUTCOME" != "success" ]; then
           echo "::error::expected fail_on=error to pass on a warn-only violation, but outcome was '$OUTCOME'"
           exit 1
         fi
         if [ "$VIOLATIONS" != "1" ]; then
-          echo "::error::expected violations_found=1 even though the job passed (fail_on doesn't erase the violation), got '$VIOLATIONS'"
+          echo "::error::expected violation_count=1 even though the job passed (fail_on doesn't erase the violation), got '$VIOLATIONS'"
           exit 1
         fi
 
@@ -448,7 +449,7 @@ jobs:
     - name: "Scenario 4: check out the yaml-policy fixture"
       run: git checkout fixture/yaml-policy
 
-    - name: "Scenario 4: ignore.globs + disallow.extensions + per-rule threshold (expect exit 1)"
+    - name: "Scenario 4: stop rule + extension + per-rule size condition (expect exit 1)"
       id: scan_yaml_policy
       continue-on-error: true
       uses: ./.rsg-action
@@ -457,25 +458,26 @@ jobs:
         head_ref: fixture/yaml-policy
         fail_on: error
 
-    - name: "Scenario 4: assert the scan failed with exactly 2 violations"
+    - name: "Scenario 4: assert the scan failed with exactly 2 violations in 2 files"
       env:
         OUTCOME: ${{ steps.scan_yaml_policy.outcome }}
-        VIOLATIONS: ${{ steps.scan_yaml_policy.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_yaml_policy.outputs.violation_count }}
+        FILES: ${{ steps.scan_yaml_policy.outputs.violating_file_count }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS' violating_file_count='$FILES'"
         if [ "$OUTCOME" != "failure" ]; then
           echo "::error::expected the yaml-policy scenario to fail (disallowed + over-threshold files present), got outcome '$OUTCOME'"
           exit 1
         fi
-        if [ "$VIOLATIONS" != "2" ]; then
-          echo "::error::expected exactly 2 violations (blocked.exe via disallow.extensions, app.log via the per-rule threshold), got '$VIOLATIONS'"
+        if [ "$VIOLATIONS" != "2" ] || [ "$FILES" != "2" ]; then
+          echo "::error::expected exactly 2 violations in 2 files (blocked.exe via the extension rule, app.log via the per-rule size condition), got violation_count='$VIOLATIONS' violating_file_count='$FILES'"
           exit 1
         fi
 
     # Same reason as scenario 2's content check: the job summary has to be
     # grepped in the step that produced it.
-    - name: "Scenario 4: assert ignore/disallow/per-rule threshold all applied correctly"
+    - name: "Scenario 4: assert the stop rule, extension rule, and per-rule size condition all applied correctly"
       run: |
         set -euo pipefail
         rc=0
@@ -486,15 +488,15 @@ jobs:
           exit 1
         fi
         if ! grep -qF 'blocked.exe' "$GITHUB_STEP_SUMMARY"; then
-          echo "::error::expected blocked.exe (disallow.extensions) to be named in the job summary"
+          echo "::error::expected blocked.exe (the extension rule) to be named in the job summary"
           exit 1
         fi
         if ! grep -qF 'app.log' "$GITHUB_STEP_SUMMARY"; then
-          echo "::error::expected app.log (per-rule size_over_kb threshold) to be named in the job summary"
+          echo "::error::expected app.log (the per-rule size condition) to be named in the job summary"
           exit 1
         fi
         if grep -qF 'huge-ignored' "$GITHUB_STEP_SUMMARY"; then
-          echo "::error::vendor/huge-ignored.exe should have been excluded by ignore.globs but was flagged anyway"
+          echo "::error::vendor/huge-ignored.exe should have been excluded by the stop rule but was flagged anyway"
           exit 1
         fi
         if grep -qF 'app-small.log' "$GITHUB_STEP_SUMMARY"; then
@@ -518,23 +520,23 @@ jobs:
     - name: "Scenario 5: assert the config-error path (exit 2) is distinguishable from violations (exit 1)"
       env:
         OUTCOME: ${{ steps.scan_malformed.outcome }}
-        VIOLATIONS: ${{ steps.scan_malformed.outputs.violations_found }}
+        VIOLATIONS: ${{ steps.scan_malformed.outputs.violation_count }}
       run: |
         set -euo pipefail
-        echo "outcome=$OUTCOME violations_found='$VIOLATIONS'"
+        echo "outcome=$OUTCOME violation_count='$VIOLATIONS'"
         if [ "$OUTCOME" != "failure" ]; then
           echo "::error::expected the malformed-policy scenario to fail, got outcome '$OUTCOME'"
           exit 1
         fi
         # A malformed policy file raises PolicyError inside main.py's run()
         # BEFORE report()/write_github_output() is ever reached (load_policy
-        # happens first) -- so, unlike scenario 2 above, violations_found/
-        # summary are never written at all here. This is how exit 2 (config
-        # error) stays distinguishable from exit 1 (real violations) purely
-        # from what the composite action exposes to a caller, since it does
-        # not expose a raw numeric exit code.
+        # happens first) -- so, unlike scenario 2 above, violation_count/
+        # violating_file_count/summary are never written at all here. This
+        # is how exit 2 (config error) stays distinguishable from exit 1
+        # (real violations) purely from what the composite action exposes
+        # to a caller, since it does not expose a raw numeric exit code.
         if [ -n "$VIOLATIONS" ]; then
-          echo "::error::expected violations_found to be UNSET for a config error (exit 2), but got '$VIOLATIONS' -- exit 1 and exit 2 are no longer distinguishable from the caller's side"
+          echo "::error::expected violation_count to be UNSET for a config error (exit 2), but got '$VIOLATIONS' -- exit 1 and exit 2 are no longer distinguishable from the caller's side"
           exit 1
         fi
 

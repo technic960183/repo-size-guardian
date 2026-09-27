@@ -11,5 +11,5 @@ rules:
     description: "Warn (do not block) on log files over 50KB"
     match:
       extensions: ["log"]
-    size_over_kb: 50
+      size: ">50KB"
     action: warn

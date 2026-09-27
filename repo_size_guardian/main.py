@@ -1,29 +1,42 @@
 """
 Main entry point for repo-size-guardian.
 
-Wires the pipeline: resolve the PR's base/head refs, compute the merge-base,
-enumerate the blobs introduced in that range (either by walking every commit,
-or as a single net diff), augment them with size and type metadata, evaluate
-them against the configured policy, and report the results (console log,
-GitHub annotations, job summary, step outputs).
+Wires the pipeline: validate the inputs and load/validate the policy (or
+build the quick-start rules) before touching git at all; resolve the PR's
+base/head refs, compute the merge-base, enumerate the blobs introduced in
+that range (either by walking every commit, or as a single net diff),
+augment them with size and type metadata, evaluate them against the rules,
+and report the results (console log, GitHub annotations, job summary, step
+outputs).
 """
 
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
+
 from . import __version__
 from .evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
+from .formatting import format_number
 from .git_utils import get_diff_files_between, get_merge_base, git_cat_file_exists, list_commits
 from .load_branch import enumerate_changed_blobs
 from .models import Blob
-from .reporting import ReportConfig, ScanStats, emit_error_annotation, report
-from .rule_engine import Policy, PolicyError, load_policy
+from .reporting import (
+    ReportConfig,
+    ScanStats,
+    append_to_file,
+    emit_error_annotation,
+    emit_warning,
+    report,
+)
+from .rule_engine import Policy, PolicyError, Rule, load_policy
 from .size_resolver import augment_blob_objects_with_sizes
 from .type_detector import augment_blob_objects_with_types
 
@@ -37,8 +50,19 @@ EXIT_OK = 0
 #: Exit code for a run with violations that fail the job under fail_on.
 EXIT_VIOLATIONS = 1
 #: Exit code for a configuration/usage error (bad policy, shallow clone,
-#: unresolvable ref, invalid input).
+#: unresolvable ref, invalid input, a policy file combined with quick-start
+#: inputs). This is the repository's own setup to fix, not this tool's.
 EXIT_CONFIG_ERROR = 2
+#: Exit code for an unexpected crash: a bug in repo-size-guardian itself,
+#: never a verdict on the pull request.
+EXIT_INTERNAL_ERROR = 3
+
+#: The quick-start inputs, in the order they act as rules (see
+#: `_quick_start_rule_dict`) and the order their names are listed in the
+#: policy/inputs conflict message.
+_QUICK_START_INPUT_NAMES = ('disallow_extensions', 'max_text_size_kb', 'max_binary_size_kb')
+
+_EXTENSION_LIST_SPLIT_RE = re.compile(r'[\s,]+')
 
 
 class ConfigError(Exception):
@@ -96,6 +120,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Maximum size for binary files in KB (unlimited if not specified)"
+    )
+    parser.add_argument(
+        "--disallow-extensions",
+        default=None,
+        help="Extensions to disallow, separated by commas and/or whitespace, "
+             "e.g. \"exe, dll, zip\" (leading dots optional)"
     )
     parser.add_argument(
         "--policy-path",
@@ -408,20 +438,25 @@ def _merge_base_or_config_error(base_ref: str, head_ref: str) -> str:
     return merge_base
 
 
-def _validate_numeric_args(args: argparse.Namespace) -> None:
+def _validate_args(args: argparse.Namespace) -> None:
     """
-    Reject negative numeric inputs, which would otherwise degrade silently.
+    Reject a handful of inputs that would otherwise degrade silently
+    instead of erroring.
 
     A negative `--max-annotations` would be read as "unlimited" (the
     0-means-unlimited check is `limit > 0`), and a negative size threshold
-    would make every single file a violation. Both are typos, and both are
-    far better reported as a configuration error than acted on.
+    would make every single file a violation. A `--disallow-extensions`
+    value that parses to zero extensions would build a rule with an empty
+    `match.extensions` list, which imposes NO condition (see
+    `rule_engine.Rule`) and so would match -- and disallow -- every single
+    file instead of none. All three are typos, and all three are far
+    better reported as a configuration error than acted on.
 
     Args:
         args: Parsed CLI arguments.
 
     Raises:
-        ConfigError: If any numeric input is negative.
+        ConfigError: If any of the above inputs is invalid.
     """
     if args.max_annotations < 0:
         raise ConfigError(
@@ -431,7 +466,130 @@ def _validate_numeric_args(args: argparse.Namespace) -> None:
     for name, value in (('--max-text-size-kb', args.max_text_size_kb),
                         ('--max-binary-size-kb', args.max_binary_size_kb)):
         if value is not None and value < 0:
-            raise ConfigError(f"{name} must be >= 0, got {value:g}")
+            raise ConfigError(f"{name} must be >= 0, got {format_number(value)}")
+
+    if args.disallow_extensions and not _parse_extension_list(args.disallow_extensions):
+        raise ConfigError(
+            f"--disallow-extensions {args.disallow_extensions!r} contains no extensions"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rules: the policy file's rules, or the quick-start inputs acting as rules
+# ---------------------------------------------------------------------------
+
+def _parse_extension_list(raw: str) -> List[str]:
+    """
+    Split a `--disallow-extensions` value into individual extensions.
+
+    Args:
+        raw: Extensions separated by commas and/or whitespace, e.g.
+            `"exe, dll, zip"`. Leading dots are optional and matching is
+            case-insensitive (see `rule_engine.matches_extension`).
+
+    Returns:
+        The individual extension strings, in the order given, with empty
+        entries (from leading/trailing/doubled separators) dropped.
+    """
+    return [part for part in _EXTENSION_LIST_SPLIT_RE.split(raw.strip()) if part]
+
+
+def _quick_start_input_is_set(name: str, args: argparse.Namespace) -> bool:
+    """Whether the named quick-start input was actually set."""
+    if name == 'disallow_extensions':
+        return bool(args.disallow_extensions)
+    if name == 'max_text_size_kb':
+        return args.max_text_size_kb is not None
+    return args.max_binary_size_kb is not None
+
+
+def _set_quick_start_input_names(args: argparse.Namespace) -> List[str]:
+    """Names of the quick-start inputs that were set, in the table's order."""
+    return [name for name in _QUICK_START_INPUT_NAMES if _quick_start_input_is_set(name, args)]
+
+
+def _quick_start_rule_dict(name: str, args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Build the plain policy-schema dict for one quick-start input's rule.
+
+    Used both to synthesize the real `Rule` objects (via `Policy.from_dict`,
+    so a quick-start rule is validated exactly like a policy one) and to
+    render the ready-to-paste YAML in the policy/inputs conflict message,
+    guaranteeing the two always agree.
+    """
+    if name == 'disallow_extensions':
+        return {
+            'id': name,
+            'match': {'extensions': _parse_extension_list(args.disallow_extensions)},
+            'action': 'error',
+        }
+    if name == 'max_text_size_kb':
+        return {
+            'id': name,
+            'match': {'binary': False, 'size': '> {0} KB'.format(format_number(args.max_text_size_kb))},
+            'action': 'error',
+        }
+    return {
+        'id': name,
+        'match': {'binary': True, 'size': '> {0} KB'.format(format_number(args.max_binary_size_kb))},
+        'action': 'error',
+    }
+
+
+def _quick_start_rules(args: argparse.Namespace, names: List[str]) -> List[Rule]:
+    """Build the Rule list acting as the given quick-start inputs, table order."""
+    if not names:
+        return []
+    rule_dicts = [_quick_start_rule_dict(name, args) for name in names]
+    policy = Policy.from_dict({'rules': rule_dicts})
+    for rule in policy.rules:
+        rule.is_input_rule = True
+    return policy.rules
+
+
+def _policy_input_conflict_message(policy_path: str, names: List[str],
+                                   args: argparse.Namespace) -> str:
+    """
+    Build the ConfigError message for a policy file combined with one or
+    more quick-start inputs (mutually exclusive -- see `_load_rules`).
+    """
+    rules_yaml = yaml.safe_dump(
+        {'rules': [_quick_start_rule_dict(name, args) for name in names]}, sort_keys=False)
+    return (
+        "Policy file '{0}' can't be combined with the {1} input(s). Remove "
+        "the input(s) from the workflow, or add these rules to the policy "
+        "file:\n\n{2}"
+    ).format(policy_path, ', '.join(names), rules_yaml)
+
+
+def _load_rules(args: argparse.Namespace) -> Tuple[List[Rule], bool]:
+    """
+    Load the rules to evaluate against: the policy file's, or the
+    quick-start inputs', never both.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        A `(rules, used_policy_file)` tuple.
+
+    Raises:
+        ConfigError: If a policy file exists at `args.policy_path` and any
+            quick-start input is also set.
+        PolicyError: If the policy file exists but is invalid.
+    """
+    policy_path = args.policy_path
+    file_exists = bool(policy_path) and os.path.isfile(policy_path)
+    quick_start_names = _set_quick_start_input_names(args)
+
+    if file_exists and quick_start_names:
+        raise ConfigError(_policy_input_conflict_message(policy_path, quick_start_names, args))
+
+    if file_exists:
+        policy, _found = load_policy(policy_path)
+        return policy.rules, True
+
+    return _quick_start_rules(args, quick_start_names), False
 
 
 # ---------------------------------------------------------------------------
@@ -528,76 +686,80 @@ def _enumerate_diff_blobs(merge_base: str, head_ref: str, head_sha: str) -> List
 
 
 # ---------------------------------------------------------------------------
-# Empty-config warning
+# Warnings that don't fail the run
 # ---------------------------------------------------------------------------
 
-def _warn_if_nothing_enforced(policy: Policy, was_found: bool, policy_path: str,
-                              args: argparse.Namespace) -> None:
+def _warn_if_nothing_enforced(rules: List[Rule], used_policy_file: bool, policy_path: str) -> None:
     """
-    Emit a prominent warning if the effective configuration enforces nothing.
+    Emit a prominent warning if there are no rules to evaluate at all.
 
-    This fires when the policy is empty (no ignore/disallow/rules/allow_globs
-    and no policy-level thresholds) AND neither `--max-text-size-kb` nor
-    `--max-binary-size-kb` was given, i.e. a clean run would be entirely
-    meaningless (nothing was ever checked). Never fails the run.
+    This fires when the rule list is empty: either a policy file was found
+    but declares no rules, no policy file was found and none of the three
+    quick-start inputs was set, or a policy file was found with no rules
+    while no quick-start input was set either. Never fails the run.
 
     Args:
-        policy: The loaded policy.
-        was_found: Whether a policy file was actually found on disk.
+        rules: The rules that will actually be evaluated.
+        used_policy_file: Whether a policy file was found at `policy_path`.
         policy_path: The configured policy path, for the message.
-        args: Parsed CLI arguments (checked for the two threshold inputs).
     """
-    if not policy.is_empty():
-        return
-    if args.max_text_size_kb is not None or args.max_binary_size_kb is not None:
+    if rules:
         return
 
-    if was_found:
-        reason = f"the policy file at '{policy_path}' does not configure anything"
+    if used_policy_file:
+        reason = f"the policy file at '{policy_path}' has no rules"
     else:
         reason = f"no policy file was found at '{policy_path}'"
 
     print("=" * 78)
     print("WARNING: repo-size-guardian is not enforcing anything.")
-    print(f"({reason}, and no --max-text-size-kb / --max-binary-size-kb was set)")
+    print(f"({reason}, and none of disallow_extensions / max_text_size_kb / "
+          f"max_binary_size_kb was set)")
     print("A passing ('clean') result from this run is meaningless.")
-    print("Fix: add thresholds/rules to your policy file, or set the")
-    print("     max_text_size_kb / max_binary_size_kb action inputs.")
+    print("Fix: add rules to your policy file's `rules:` list, or set the")
+    print("     disallow_extensions / max_text_size_kb / max_binary_size_kb inputs.")
     print("=" * 78)
-    print(
-        "::warning::repo-size-guardian: no policy and no size thresholds are "
-        "configured, so nothing is being enforced and a passing result means "
-        "nothing was checked. Add rules/thresholds to your policy file or set "
-        "max_text_size_kb/max_binary_size_kb."
+    # `stream=sys.stdout` is passed explicitly (looked up at call time)
+    # rather than relying on emit_warning's own default argument, which is
+    # bound once at reporting.py's import time -- see the same note on the
+    # `report(...)` call in `run()`.
+    emit_warning(
+        "repo-size-guardian: no policy rules and none of disallow_extensions, "
+        "max_text_size_kb, max_binary_size_kb are configured, so nothing is "
+        "being enforced and a passing result means nothing was checked. Add "
+        "rules to your policy file's `rules:` list, or set one of those "
+        "inputs.",
+        stream=sys.stdout,
     )
 
 
-def _warn_if_mime_matching_unavailable(policy: Policy) -> None:
+def _warn_if_mime_matching_unavailable(rules: List[Rule]) -> None:
     """
-    Warn if the policy matches on MIME type but `file` is not installed.
+    Warn if the rules match on MIME type but `file` is not installed.
 
     MIME types only ever come from `file --mime`; the content-heuristic
     fallback reports `mime_type=None`, and `matches_mime(None, ...)` is
     always False. So on a runner without the `file` command, every
-    `disallow.mime_types` entry and every `match.mime_types` rule silently
-    matches nothing and the scan passes clean -- a false negative that
-    looks exactly like a clean PR. Only warn when the policy actually
-    relies on MIME matching, to keep the log quiet for everyone else.
+    `match.mime_types` rule silently matches nothing and the scan passes
+    clean -- a false negative that looks exactly like a clean PR. Only warn
+    when a rule actually relies on MIME matching, to keep the log quiet for
+    everyone else.
 
     Args:
-        policy: The loaded policy.
+        rules: The rules that will actually be evaluated.
     """
-    uses_mime = bool(policy.disallow_mime_types) or any(
-        rule.match_mime_types for rule in policy.rules)
+    uses_mime = any(rule.match_mime_types for rule in rules)
     if not uses_mime or shutil.which('file') is not None:
         return
 
-    print(
-        "::warning::repo-size-guardian: your policy matches on MIME types, but "
-        "the `file` command is not available on this runner. MIME detection "
-        "falls back to content heuristics, which report no MIME type, so every "
-        "mime_types entry in your policy will match nothing. Install `file` "
-        "(e.g. `apt-get install -y file`) or match on globs/extensions instead."
+    emit_warning(
+        "repo-size-guardian: your policy matches on MIME types, but the "
+        "`file` command is not available on this runner. MIME detection "
+        "falls back to content heuristics, which report no MIME type, so "
+        "every mime_types entry in your policy will match nothing. Install "
+        "`file` (e.g. `apt-get install -y file`) or match on globs/"
+        "extensions instead.",
+        stream=sys.stdout,
     )
 
 
@@ -682,15 +844,21 @@ def run(args: argparse.Namespace) -> int:
     """
     Execute the scan pipeline for already-parsed arguments.
 
+    Inputs are validated and the rules loaded (policy file or quick-start
+    inputs) before any git command runs at all, so a broken setup fails
+    fast and never produces violations.
+
     Args:
         args: Parsed CLI arguments.
 
     Returns:
         The process exit code (0 clean, 1 violations, 2 configuration error).
     """
-    _validate_numeric_args(args)
+    _validate_args(args)
     dedupe_blobs = _parse_bool(args.dedupe_blobs, '--dedupe-blobs')
     annotate_pr = _parse_bool(args.annotate_pr, '--annotate-pr')
+
+    rules, used_policy_file = _load_rules(args)
 
     if _is_shallow_repository():
         # Raised (rather than printed here) so this shares the exact same
@@ -708,16 +876,14 @@ def run(args: argparse.Namespace) -> int:
     augment_blob_objects_with_sizes(blobs)
     augment_blob_objects_with_types(blobs)
 
-    policy, was_found = load_policy(args.policy_path)
-    _warn_if_nothing_enforced(policy, was_found, args.policy_path, args)
-    _warn_if_mime_matching_unavailable(policy)
+    _warn_if_nothing_enforced(rules, used_policy_file, args.policy_path)
+    _warn_if_mime_matching_unavailable(rules)
 
-    eval_config = EvaluationConfig(
-        max_text_size_kb=args.max_text_size_kb,
-        max_binary_size_kb=args.max_binary_size_kb,
-        dedupe_blobs=dedupe_blobs,
-    )
-    violations = evaluate_blobs(blobs, policy, eval_config)
+    eval_config = EvaluationConfig(dedupe_blobs=dedupe_blobs)
+    # stream=sys.stdout is passed explicitly for the same reason as the
+    # report(...) call below: a default argument bound at evaluator.py's
+    # import time would bypass a test's contextlib.redirect_stdout.
+    entries = evaluate_blobs(blobs, rules, eval_config, stream=sys.stdout)
 
     unique_blobs = len({blob.blob_sha for blob in blobs if blob.blob_sha})
     stats = ScanStats(
@@ -730,36 +896,67 @@ def run(args: argparse.Namespace) -> int:
     # argument (bound once, at reporting.py's import time): callers such as
     # tests that swap sys.stdout at runtime (contextlib.redirect_stdout)
     # would otherwise have their capture silently bypassed.
-    report(violations, stats, report_config, stream=sys.stdout)
+    report(entries, stats, report_config, stream=sys.stdout)
 
-    return EXIT_VIOLATIONS if has_failing_violations(violations, args.fail_on) else EXIT_OK
+    return EXIT_VIOLATIONS if has_failing_violations(entries, args.fail_on) else EXIT_OK
 
 
 _ISSUE_TRACKER_URL = "https://github.com/technic960183/repo-size-guardian/issues"
 
+#: Appended to a configuration error's ::error:: annotation and job summary,
+#: so a reader lands on "this repository's setup is broken" rather than
+#: mistaking exit code 2 for a bug in the tool or a policy violation.
+_CONFIG_ERROR_SENTENCE = (
+    "This is a problem with this repository's repo-size-guardian setup, "
+    "not with the pull request. A maintainer needs to fix it."
+)
+
+
+def _write_status_summary(status: str, message: str, sentence: Optional[str] = None) -> None:
+    """
+    Append a `## Repo Size Guardian` job summary for a run that never
+    reached `report()` -- a configuration error or an internal crash.
+
+    No-ops if `$GITHUB_STEP_SUMMARY` is not set (e.g. running locally).
+
+    Args:
+        status: The `**Status:**` line's value, e.g. "Configuration error".
+        message: The error message to show.
+        sentence: An optional extra sentence appended after the message.
+    """
+    step_summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+    if not step_summary_path:
+        return
+    content = "## Repo Size Guardian\n\n**Status:** {0}  \n{1}\n".format(status, message)
+    if sentence:
+        content += "\n{0}\n".format(sentence)
+    append_to_file(step_summary_path, content)
+
 
 def _report_config_error(message: str) -> None:
     """
-    Print a configuration/usage-error message to stderr and mirror it as a
-    GitHub ``::error::`` annotation on stdout.
+    Print a configuration/usage-error message to stderr, mirror it (with an
+    added explanation of whose problem this is) as a GitHub ``::error::``
+    annotation, and write a matching job summary.
 
     Covers every exit-2 condition that is the *user's* configuration to
     fix: `ConfigError` (a shallow clone, a bad/unresolvable ref, an
-    unrelated-history merge-base, an invalid input, ...), `PolicyError`, a
-    failed git command, and an invalid value. A misconfiguration is
-    currently just as easy to miss inside a (typically collapsed) step's
-    plain log as an internal crash, so it gets the same "make it impossible
-    to miss" annotation treatment as the internal-error handler in `main()`
-    (see `_internal_error_message`). Deliberately does NOT say "bug" or
-    point at the issue tracker, though: fixing one of these is on the
-    user, not on us.
+    unrelated-history merge-base, an invalid input, a policy file combined
+    with quick-start inputs, ...), `PolicyError`, a failed git command, and
+    an invalid value. A misconfiguration is currently just as easy to miss
+    inside a (typically collapsed) step's plain log as an internal crash,
+    so it gets the same "make it impossible to miss" annotation treatment
+    as the internal-error handler in `main()` (see `_internal_error_message`).
+    Deliberately does NOT say "bug" or point at the issue tracker, though:
+    fixing one of these is on the user, not on us.
 
     Args:
         message: The fully-formatted ``"repo-size-guardian: error: ..."``
             message.
     """
     print(message, file=sys.stderr)
-    emit_error_annotation(message, stream=sys.stdout)
+    emit_error_annotation(f"{message} {_CONFIG_ERROR_SENTENCE}", stream=sys.stdout)
+    _write_status_summary("Configuration error", message, _CONFIG_ERROR_SENTENCE)
 
 
 def _internal_error_message(exc: BaseException) -> str:
@@ -769,9 +966,8 @@ def _internal_error_message(exc: BaseException) -> str:
     Includes the installed package version and a direct link to the issue
     tracker so a bug report arrives actionable, and is deliberately
     explicit that this is a bug in repo-size-guardian itself -- not a
-    policy violation in the user's PR -- since exit code 2 is shared with
-    genuine configuration errors (see `_report_config_error`) that a reader
-    must not confuse this with.
+    policy violation in the user's PR -- since a reader must not confuse
+    this exit code with either a configuration error or a real violation.
 
     Args:
         exc: The exception that escaped `run()`.
@@ -812,19 +1008,20 @@ def main() -> int:
         _report_config_error(f"repo-size-guardian: error: {exc}")
         return EXIT_CONFIG_ERROR
     except Exception as exc:  # pylint: disable=broad-except
-        # An unexpected crash must never be reported as exit code 1: that
-        # is the "violations found" code, so a workflow (or a human) would
-        # read an internal bug as "this PR has a policy violation". Print
-        # the full traceback -- this is a bug report, not a user error --
-        # and exit with the configuration/usage code instead. The message
-        # also goes out as a `::error::` annotation (not just a log line),
-        # since this is the one failure mode most worth surfacing loudly:
-        # an internal crash the user did nothing to cause.
+        # An unexpected crash must never be reported as exit code 1 (that
+        # is "violations found") or exit code 2 (a configuration error the
+        # user caused): print the full traceback -- this is a bug report,
+        # not a user error -- and exit with the dedicated internal-error
+        # code instead. The message also goes out as a `::error::`
+        # annotation (not just a log line) and a job summary, since this is
+        # the one failure mode most worth surfacing loudly: an internal
+        # crash the user did nothing to cause.
         traceback.print_exc()
         message = _internal_error_message(exc)
         print(message, file=sys.stderr)
         emit_error_annotation(message, stream=sys.stdout)
-        return EXIT_CONFIG_ERROR
+        _write_status_summary("Internal error", message)
+        return EXIT_INTERNAL_ERROR
 
 
 if __name__ == "__main__":

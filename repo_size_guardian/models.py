@@ -1,20 +1,28 @@
 """
-Data models for repository analysis.
+Data models shared between the git-enumeration, evaluation, and reporting
+stages.
 
-Provides shared data structures for blobs, violations, and other entities.
+`Blob` is one candidate file version: a path plus the content a commit
+introduced there. `Violation` is one rule (or quick-start input, which acts
+as a rule -- see `main.py`) matching one file version: a "hit" in this
+package's vocabulary, called a "violation" in user-facing text. `ReportEntry`
+groups every hit a single file version collected into the one row it becomes
+in the report.
 """
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class Blob:
     """
-    Represents a git blob with metadata.
+    One file version under consideration: a path plus the blob (content) a
+    commit introduced there.
 
-    This class encapsulates all information about a git blob including
-    its location, content properties, and change status.
+    Carries the per-file-version facts the rule engine matches against
+    (`is_binary`, `mime_type`, `size_bytes`), computed once by the
+    `size_resolver`/`type_detector` augmentation passes before evaluation.
     """
     path: str
     blob_sha: str
@@ -84,41 +92,59 @@ class Blob:
 @dataclass
 class Violation:
     """
-    Represents a policy violation found in repository analysis.
+    One rule matching one file version -- a "hit".
 
-    This class represents any violation of repository policies such as
-    file size limits, forbidden file types, or other constraints.
+    Attributes:
+        rule_name: The matched rule's report name (its `id`, `rules[N]`, or
+            a quick-start input name such as `max_text_size_kb`).
+        message: The human-readable reason, ready to show as-is.
+        severity: `'warn'` or `'error'`.
+        is_input_rule: True when `rule_name` names a quick-start input
+            rather than a policy rule; only affects remediation wording.
+        has_size_condition: True when the matched rule had a `size`
+            condition, so a report can group it with the size-specific "how
+            to fix" hint.
+        is_binary: The file version's `Blob.is_binary` at match time, kept
+            here so a size-related hint can be phrased for binary vs. text
+            without needing the `Blob` back.
     """
-    blob: Blob
     rule_name: str
     message: str
-    severity: str = 'error'  # 'warn' | 'error'
-    category: str = 'size'  # 'size' | 'disallowed' | 'rule'  (for summary counts by type)
-    threshold_kb: Optional[float] = None  # the limit that was exceeded, if size-related
+    severity: str  # 'warn' | 'error'
+    is_input_rule: bool = False
+    has_size_condition: bool = False
+    is_binary: Optional[bool] = None
+
+
+@dataclass
+class ReportEntry:
+    """
+    One file version that collected at least one `Violation`.
+
+    Attributes:
+        blob: The file version.
+        violations: Its hits, in the order the rules that produced them
+            were declared.
+    """
+    blob: Blob
+    violations: List[Violation] = field(default_factory=list)
 
     @property
     def path(self) -> str:
-        """Get the file path for this violation."""
+        """The file version's path."""
         return self.blob.path
 
     @property
-    def blob_sha(self) -> str:
-        """Get the blob SHA for this violation."""
-        return self.blob.blob_sha
-
-    @property
     def commit_sha(self) -> str:
-        """Get the commit SHA for this violation."""
+        """The commit that introduced this file version."""
         return self.blob.commit_sha
 
     @property
     def size_bytes(self) -> Optional[int]:
-        """Get the file size for this violation."""
+        """The file version's size, or None if unknown."""
         return self.blob.size_bytes
 
     @property
-    def size_kb(self) -> Optional[float]:
-        """Get the file size in kilobytes for this violation, or None if unknown."""
-        if self.size_bytes is None:
-            return None
-        return self.size_bytes / 1024.0
+    def severity(self) -> str:
+        """The highest severity among this entry's violations ('error' > 'warn')."""
+        return 'error' if any(v.severity == 'error' for v in self.violations) else 'warn'

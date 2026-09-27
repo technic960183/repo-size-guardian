@@ -1,16 +1,20 @@
 """
 Test suite for the evaluator module.
 
-Covers the per-blob evaluation order (skip rules, ignore/allow precedence,
-rule terminality, disallow lists, global thresholds), the `(blob_sha, path)`
-dedupe behavior, and `has_failing_violations`.
+Covers the per-blob rule walk (skip rules, AND/OR semantics delegated to
+rule_engine, `stop` keeping earlier hits, one entry per file version with
+the highest severity), the `(blob_sha, path)` dedupe behavior, the
+unknown-size warning, hit message construction (both the quick-start-input
+style and the generic policy-rule style, including the size parenthetical),
+and `has_failing_violations`.
 """
 
+import io
 import unittest
 
 from repo_size_guardian.evaluator import EvaluationConfig, evaluate_blobs, has_failing_violations
 from repo_size_guardian.models import Blob
-from repo_size_guardian.rule_engine import Policy, Rule
+from repo_size_guardian.rule_engine import Rule, SizeCondition
 
 KB = 1024
 
@@ -29,389 +33,338 @@ def make_blob(path='a.txt', blob_sha='sha1', commit_sha='c1', status='A',
     )
 
 
+def stop_rule(**kwargs):
+    return Rule(name=kwargs.pop('name', 'stop'), action='stop', **kwargs)
+
+
 class TestSkipDeletionsAndEmptySha(unittest.TestCase):
-    """Step 0: deletions and blobs with no content are skipped entirely."""
+    """Deletions and blobs with no content are skipped entirely."""
 
     def test_deleted_blob_is_skipped(self):
         blob = make_blob(status='D', blob_sha='', size_bytes=10 * KB * KB)
-        config = EvaluationConfig(max_text_size_kb=1)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
+        rule = Rule(name='r', match_size=SizeCondition('>', 1, 'KB'))
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries, [])
 
     def test_deleted_blob_with_nonempty_sha_is_still_skipped(self):
         # Defensive: is_deleted alone must be enough to skip, regardless of
         # whether a blob_sha happens to be present.
         blob = make_blob(status='D', blob_sha='deadbeef', size_bytes=10 * KB * KB)
-        config = EvaluationConfig(max_text_size_kb=1)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
+        rule = Rule(name='r', match_size=SizeCondition('>', 1, 'KB'))
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries, [])
 
     def test_empty_blob_sha_is_skipped_even_if_not_marked_deleted(self):
         blob = make_blob(status='A', blob_sha='', size_bytes=10 * KB * KB)
-        config = EvaluationConfig(max_text_size_kb=1)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
+        rule = Rule(name='r', match_size=SizeCondition('>', 1, 'KB'))
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries, [])
 
     def test_normal_blob_is_not_skipped(self):
         blob = make_blob(status='A', blob_sha='sha1', size_bytes=10 * KB * KB)
-        config = EvaluationConfig(max_text_size_kb=1)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
+        rule = Rule(name='r', match_size=SizeCondition('>', 1, 'KB'))
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
 
 
-class TestIgnoreAndAllowPrecedence(unittest.TestCase):
-    """Step 1/2: ignore beats everything; allow_globs beats rules and disallow."""
+class TestRuleWalk(unittest.TestCase):
+    """Every non-stop matching rule records a hit; the walk continues."""
 
-    def test_ignore_globs_skips_before_disallow(self):
-        policy = Policy(ignore_globs=['*.secret'], disallow_extensions=['secret'])
-        blob = make_blob(path='a.secret')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(violations, [])
+    def test_no_rules_produces_no_entries(self):
+        blob = make_blob()
+        self.assertEqual(evaluate_blobs([blob], [], EvaluationConfig()), [])
 
-    def test_ignore_paths_skips_exact_path(self):
-        policy = Policy(ignore_paths=['data/big.bin'], disallow_extensions=['bin'])
-        blob = make_blob(path='data/big.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(violations, [])
+    def test_non_matching_rule_produces_no_hit(self):
+        rule = Rule(name='r', match_extensions=['exe'])
+        entries = evaluate_blobs([make_blob(path='a.txt')], [rule], EvaluationConfig())
+        self.assertEqual(entries, [])
 
-    def test_allow_globs_beats_disallow_list(self):
-        policy = Policy(disallow_extensions=['ipynb'], allow_globs=['notebooks/*.ipynb'])
-        blob = make_blob(path='notebooks/a.ipynb')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(violations, [])
+    def test_single_matching_rule_produces_one_hit(self):
+        rule = Rule(name='no-notebooks', match_extensions=['ipynb'], action='error')
+        entries = evaluate_blobs([make_blob(path='a.ipynb')], [rule], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries[0].violations), 1)
+        violation = entries[0].violations[0]
+        self.assertEqual(violation.rule_name, 'no-notebooks')
+        self.assertEqual(violation.severity, 'error')
 
-    def test_allow_globs_beats_matching_rule(self):
-        rule = Rule(id='big-binary', match_binary=True, size_over_kb=None, action='error')
-        policy = Policy(rules=[rule], allow_globs=['*.bin'])
-        blob = make_blob(path='a.bin', is_binary=True)
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(violations, [])
+    def test_two_matching_non_stop_rules_both_record_hits(self):
+        rule1 = Rule(name='first', match_extensions=['bin'], action='warn')
+        rule2 = Rule(name='second', match_extensions=['bin'], action='error')
+        entries = evaluate_blobs([make_blob(path='a.bin')], [rule1, rule2], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual([v.rule_name for v in entry.violations], ['first', 'second'])
+        # Highest severity among the hits.
+        self.assertEqual(entry.severity, 'error')
 
-    def test_allow_globs_beats_global_threshold(self):
-        policy = Policy(allow_globs=['huge.txt'])
-        blob = make_blob(path='huge.txt', size_bytes=1000 * KB)
-        config = EvaluationConfig(max_text_size_kb=10)
-        violations = evaluate_blobs([blob], policy, config)
-        self.assertEqual(violations, [])
+    def test_hits_are_listed_in_rule_order(self):
+        rule1 = Rule(name='a', match_extensions=['bin'], action='error')
+        rule2 = Rule(name='b', match_extensions=['bin'], action='error')
+        rule3 = Rule(name='c', match_extensions=['bin'], action='error')
+        entries = evaluate_blobs(
+            [make_blob(path='a.bin')], [rule1, rule2, rule3], EvaluationConfig())
+        self.assertEqual([v.rule_name for v in entries[0].violations], ['a', 'b', 'c'])
 
-
-class TestRuleTerminality(unittest.TestCase):
-    """Step 3: a matched rule is terminal, whether or not it violates."""
-
-    def test_unconditional_rule_always_violates(self):
-        rule = Rule(id='no-notebooks', match_extensions=['ipynb'], size_over_kb=None,
-                    action='error')
-        policy = Policy(rules=[rule])
-        blob = make_blob(path='a.ipynb', size_bytes=1)
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        v = violations[0]
-        self.assertEqual(v.category, 'rule')
-        self.assertEqual(v.severity, 'error')
-        self.assertEqual(v.rule_name, 'no-notebooks')
-        self.assertIsNone(v.threshold_kb)
-
-    def test_gated_rule_under_gate_produces_no_violation_and_does_not_fall_through(self):
-        # The critical terminality case: the blob matches a rule, is under
-        # that rule's size gate, has a disallowed extension, AND exceeds the
-        # global threshold. Because the rule matched, none of that matters:
-        # the blob must produce NO violation at all.
-        rule = Rule(id='big-bin', match_extensions=['bin'], size_over_kb=1000,
-                    action='error')
-        policy = Policy(
-            rules=[rule],
-            disallow_extensions=['bin'],
-            max_binary_size_kb=1,
-        )
-        blob = make_blob(path='a.bin', size_bytes=10 * KB, is_binary=True)  # 10 KB < 1000 KB gate
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(violations, [], "matched rule under its gate must not fall through")
-
-    def test_gated_rule_over_gate_violates_with_rule_category_only(self):
-        rule = Rule(id='big-bin', match_extensions=['bin'], size_over_kb=5, action='warn')
-        policy = Policy(rules=[rule], disallow_extensions=['bin'], max_binary_size_kb=1)
-        blob = make_blob(path='a.bin', size_bytes=10 * KB, is_binary=True)  # 10 KB > 5 KB gate
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        v = violations[0]
-        self.assertEqual(v.category, 'rule')
-        self.assertEqual(v.severity, 'warn')
-        self.assertEqual(v.rule_name, 'big-bin')
-        self.assertEqual(v.threshold_kb, 5)
-
-    def test_first_matching_rule_wins_in_declaration_order(self):
-        rule1 = Rule(id='first', match_extensions=['bin'], size_over_kb=None, action='warn')
-        rule2 = Rule(id='second', match_extensions=['bin'], size_over_kb=None, action='error')
-        policy = Policy(rules=[rule1, rule2])
-        blob = make_blob(path='a.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'first')
-        self.assertEqual(violations[0].severity, 'warn')
-
-    def test_non_matching_rule_falls_through_to_later_rule(self):
-        rule1 = Rule(id='only-md', match_extensions=['md'], size_over_kb=None, action='error')
-        rule2 = Rule(id='catch-bin', match_extensions=['bin'], size_over_kb=None, action='warn')
-        policy = Policy(rules=[rule1, rule2])
-        blob = make_blob(path='a.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'catch-bin')
-
-    def test_no_matching_rule_falls_through_to_disallow(self):
-        rule = Rule(id='only-md', match_extensions=['md'], size_over_kb=None, action='error')
-        policy = Policy(rules=[rule], disallow_extensions=['bin'])
-        blob = make_blob(path='a.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].category, 'disallowed')
-        self.assertEqual(violations[0].rule_name, 'disallow.extensions')
+    def test_only_warn_hits_have_warn_severity(self):
+        rule = Rule(name='w', match_extensions=['bin'], action='warn')
+        entries = evaluate_blobs([make_blob(path='a.bin')], [rule], EvaluationConfig())
+        self.assertEqual(entries[0].severity, 'warn')
 
 
-class TestDisallowLists(unittest.TestCase):
-    """Step 4: disallow lists are unconditional matches and terminal."""
+class TestStopAction(unittest.TestCase):
+    """A matching `stop` rule ends the walk, keeping earlier hits."""
 
-    def test_disallow_extensions(self):
-        policy = Policy(disallow_extensions=['ipynb'])
-        blob = make_blob(path='notebook.ipynb')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        v = violations[0]
-        self.assertEqual(v.rule_name, 'disallow.extensions')
-        self.assertEqual(v.category, 'disallowed')
-        self.assertEqual(v.severity, 'error')
+    def test_stop_rule_with_no_earlier_hits_produces_no_entry(self):
+        rule = stop_rule(match_globs=['vendor/**'])
+        blob = make_blob(path='vendor/a.exe')
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries, [])
 
-    def test_disallow_globs(self):
-        policy = Policy(disallow_globs=['**/*.secret'])
-        blob = make_blob(path='a/b/x.secret')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'disallow.globs')
-        self.assertEqual(violations[0].category, 'disallowed')
+    def test_stop_rule_excludes_rules_listed_after_it(self):
+        stop = stop_rule(match_globs=['vendor/**'])
+        disallow = Rule(name='no-exe', match_extensions=['exe'], action='error')
+        blob = make_blob(path='vendor/a.exe')
+        entries = evaluate_blobs([blob], [stop, disallow], EvaluationConfig())
+        self.assertEqual(entries, [])
 
-    def test_disallow_mime_types(self):
-        policy = Policy(disallow_mime_types=['application/x-dosexec'])
-        blob = make_blob(path='a.exe', mime_type='application/x-dosexec')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'disallow.mime_types')
-        self.assertEqual(violations[0].category, 'disallowed')
+    def test_stop_rule_keeps_hits_recorded_before_it(self):
+        earlier = Rule(name='no-exe', match_extensions=['exe'], action='error')
+        stop = stop_rule(match_globs=['vendor/**'])
+        later = Rule(name='never-reached', match_extensions=['exe'], action='warn')
+        blob = make_blob(path='vendor/a.exe')
+        entries = evaluate_blobs([blob], [earlier, stop, later], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual([v.rule_name for v in entries[0].violations], ['no-exe'])
 
-    def test_disallow_match_is_terminal_over_global_threshold(self):
-        policy = Policy(disallow_extensions=['bin'], max_binary_size_kb=1000)
-        blob = make_blob(path='a.bin', size_bytes=1, is_binary=True)  # tiny, well under threshold
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].category, 'disallowed')
-
-    def test_no_disallow_match_falls_through_to_threshold(self):
-        policy = Policy(disallow_extensions=['exe'], max_text_size_kb=1)
-        blob = make_blob(path='a.txt', size_bytes=2 * KB)
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].category, 'size')
-
-    def test_extension_precedence_over_mime_when_both_match(self):
-        # The disallow lists are checked in a fixed order: extensions, then
-        # globs, then mime_types.
-        policy = Policy(disallow_extensions=['exe'], disallow_mime_types=['application/x-dosexec'])
-        blob = make_blob(path='a.exe', mime_type='application/x-dosexec')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'disallow.extensions')
-
-
-class TestGlobalThresholds(unittest.TestCase):
-    """Step 5: policy thresholds override config; strictly greater-than."""
-
-    def test_text_over_config_threshold_violates(self):
-        config = EvaluationConfig(max_text_size_kb=10)
-        blob = make_blob(path='a.txt', size_bytes=20 * KB, is_binary=False)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        v = violations[0]
-        self.assertEqual(v.category, 'size')
-        self.assertEqual(v.severity, 'error')
-        self.assertEqual(v.rule_name, 'threshold.max_text_size_kb')
-        self.assertEqual(v.threshold_kb, 10)
-
-    def test_binary_over_config_threshold_violates(self):
-        config = EvaluationConfig(max_binary_size_kb=10)
-        blob = make_blob(path='a.bin', size_bytes=20 * KB, is_binary=True)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'threshold.max_binary_size_kb')
-
-    def test_is_binary_none_is_treated_as_text(self):
-        config = EvaluationConfig(max_text_size_kb=10, max_binary_size_kb=1000)
-        blob = make_blob(path='a.dat', size_bytes=20 * KB, is_binary=None)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].rule_name, 'threshold.max_text_size_kb')
-
-    def test_policy_threshold_overrides_config_threshold(self):
-        policy = Policy(max_text_size_kb=10)
-        config = EvaluationConfig(max_text_size_kb=1000)
-        blob = make_blob(path='a.txt', size_bytes=20 * KB, is_binary=False)
-        violations = evaluate_blobs([blob], policy, config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].threshold_kb, 10)
-
-    def test_policy_threshold_none_falls_back_to_config(self):
-        policy = Policy(max_text_size_kb=None)
-        config = EvaluationConfig(max_text_size_kb=10)
-        blob = make_blob(path='a.txt', size_bytes=20 * KB, is_binary=False)
-        violations = evaluate_blobs([blob], policy, config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].threshold_kb, 10)
-
-    def test_both_none_means_no_limit(self):
-        policy = Policy(max_text_size_kb=None)
-        config = EvaluationConfig(max_text_size_kb=None)
-        blob = make_blob(path='a.txt', size_bytes=1000 * KB * KB, is_binary=False)
-        violations = evaluate_blobs([blob], policy, config)
-        self.assertEqual(violations, [])
-
-    def test_exactly_at_limit_passes(self):
-        config = EvaluationConfig(max_text_size_kb=10)
-        blob = make_blob(path='a.txt', size_bytes=10 * KB, is_binary=False)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
-
-    def test_one_byte_under_limit_passes(self):
-        config = EvaluationConfig(max_text_size_kb=10)
-        blob = make_blob(path='a.txt', size_bytes=10 * KB - 1, is_binary=False)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
-
-    def test_one_byte_over_limit_violates(self):
-        config = EvaluationConfig(max_text_size_kb=10)
-        blob = make_blob(path='a.txt', size_bytes=10 * KB + 1, is_binary=False)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].threshold_kb, 10)
-
-    def test_unknown_size_never_violates(self):
-        config = EvaluationConfig(max_text_size_kb=1)
-        blob = make_blob(path='a.txt', size_bytes=None, is_binary=False)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self.assertEqual(violations, [])
+    def test_non_matching_stop_rule_does_not_affect_the_walk(self):
+        stop = stop_rule(match_globs=['vendor/**'])
+        disallow = Rule(name='no-exe', match_extensions=['exe'], action='error')
+        blob = make_blob(path='a.exe')  # not under vendor/
+        entries = evaluate_blobs([blob], [stop, disallow], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].violations[0].rule_name, 'no-exe')
 
 
 class TestDedupe(unittest.TestCase):
     """Dedupe on (blob_sha, path), keep the first occurrence."""
 
     def test_same_sha_and_path_deduped_keeps_first_regardless_of_second(self):
-        # First occurrence is small (no violation); second occurrence (same
-        # sha+path) is large. Because dedupe skips the second entirely, the
-        # result must show NO violation -- not "evaluate all, keep first
-        # violation found".
-        config = EvaluationConfig(max_text_size_kb=10, dedupe_blobs=True)
+        rule = Rule(name='big', match_size=SizeCondition('>', 10, 'KB'))
         first = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c1', size_bytes=1 * KB)
         second = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c2', size_bytes=100 * KB)
-        violations = evaluate_blobs([first, second], Policy.empty(), config)
-        self.assertEqual(violations, [])
+        entries = evaluate_blobs(
+            [first, second], [rule], EvaluationConfig(dedupe_blobs=True))
+        self.assertEqual(entries, [])
 
-    def test_same_sha_different_path_yields_two_evaluations(self):
-        config = EvaluationConfig(max_text_size_kb=10, dedupe_blobs=True)
+    def test_same_sha_different_path_yields_two_entries(self):
+        rule = Rule(name='big', match_size=SizeCondition('>', 10, 'KB'))
         first = make_blob(path='a.txt', blob_sha='sha1', size_bytes=100 * KB)
         second = make_blob(path='b.txt', blob_sha='sha1', size_bytes=100 * KB)
-        violations = evaluate_blobs([first, second], Policy.empty(), config)
-        self.assertEqual(len(violations), 2)
-        self.assertEqual({v.path for v in violations}, {'a.txt', 'b.txt'})
+        entries = evaluate_blobs(
+            [first, second], [rule], EvaluationConfig(dedupe_blobs=True))
+        self.assertEqual(len(entries), 2)
+        self.assertEqual({e.path for e in entries}, {'a.txt', 'b.txt'})
 
     def test_dedupe_false_reports_every_occurrence(self):
-        config = EvaluationConfig(max_text_size_kb=10, dedupe_blobs=False)
+        rule = Rule(name='big', match_size=SizeCondition('>', 10, 'KB'))
         first = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c1', size_bytes=100 * KB)
         second = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c2', size_bytes=100 * KB)
-        violations = evaluate_blobs([first, second], Policy.empty(), config)
-        self.assertEqual(len(violations), 2)
+        entries = evaluate_blobs(
+            [first, second], [rule], EvaluationConfig(dedupe_blobs=False))
+        self.assertEqual(len(entries), 2)
 
     def test_dedupe_keeps_earliest_when_first_violates_and_second_would_not(self):
-        config = EvaluationConfig(max_text_size_kb=10, dedupe_blobs=True)
+        rule = Rule(name='big', match_size=SizeCondition('>', 10, 'KB'))
         first = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c1', size_bytes=100 * KB)
         second = make_blob(path='a.txt', blob_sha='sha1', commit_sha='c2', size_bytes=1 * KB)
-        violations = evaluate_blobs([first, second], Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].commit_sha, 'c1')
+        entries = evaluate_blobs(
+            [first, second], [rule], EvaluationConfig(dedupe_blobs=True))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].commit_sha, 'c1')
+
+
+class TestUnknownSizeWarning(unittest.TestCase):
+    """The "could not read the size" warning fires at most once per file version."""
+
+    def test_warns_when_size_condition_would_have_run(self):
+        rule = Rule(name='big-log', match_extensions=['log'],
+                    match_size=SizeCondition('>', 50, 'KB'))
+        blob = make_blob(path='a.log', blob_sha='sha1', commit_sha='c1' * 20, size_bytes=None)
+        stream = io.StringIO()
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig(), stream=stream)
+        self.assertEqual(entries, [])  # unknown size never satisfies a size condition
+        output = stream.getvalue()
+        self.assertIn('::warning::', output)
+        self.assertIn('could not read the size of a.log', output)
+        self.assertIn('c1c1c1c', output)  # short sha
+
+    def test_no_warning_when_rule_would_not_have_matched_anyway(self):
+        rule = Rule(name='big-log', match_extensions=['log'],
+                    match_size=SizeCondition('>', 50, 'KB'))
+        blob = make_blob(path='a.txt', size_bytes=None)  # wrong extension
+        stream = io.StringIO()
+        evaluate_blobs([blob], [rule], EvaluationConfig(), stream=stream)
+        self.assertEqual(stream.getvalue(), '')
+
+    def test_no_warning_when_no_rule_has_a_size_condition(self):
+        rule = Rule(name='r', match_extensions=['log'])
+        blob = make_blob(path='a.log', size_bytes=None)
+        stream = io.StringIO()
+        evaluate_blobs([blob], [rule], EvaluationConfig(), stream=stream)
+        self.assertEqual(stream.getvalue(), '')
+
+    def test_warning_fires_at_most_once_per_file_version(self):
+        rule1 = Rule(name='r1', match_size=SizeCondition('>', 1, 'KB'), action='warn')
+        rule2 = Rule(name='r2', match_size=SizeCondition('>', 2, 'KB'), action='warn')
+        blob = make_blob(path='a.log', size_bytes=None)
+        stream = io.StringIO()
+        evaluate_blobs([blob], [rule1, rule2], EvaluationConfig(), stream=stream)
+        self.assertEqual(stream.getvalue().count('::warning::'), 1)
+
+    def test_warning_fires_again_for_a_different_file_version(self):
+        rule = Rule(name='r', match_size=SizeCondition('>', 1, 'KB'))
+        first = make_blob(path='a.log', blob_sha='sha1', size_bytes=None)
+        second = make_blob(path='b.log', blob_sha='sha2', size_bytes=None)
+        stream = io.StringIO()
+        evaluate_blobs([first, second], [rule], EvaluationConfig(), stream=stream)
+        self.assertEqual(stream.getvalue().count('::warning::'), 2)
+
+
+class TestInputRuleMessages(unittest.TestCase):
+    """Hit messages for the three quick-start-input rules use today's established style."""
+
+    def test_disallow_extensions_message(self):
+        rule = Rule(name='disallow_extensions', match_extensions=['exe'],
+                    action='error', is_input_rule=True)
+        blob = make_blob(path='a/b.EXE')
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries[0].violations[0].message, "File extension '.EXE' is disallowed")
+
+    def test_max_text_size_kb_message(self):
+        rule = Rule(name='max_text_size_kb', match_binary=False,
+                    match_size=SizeCondition('>', 1, 'KB'), action='error', is_input_rule=True)
+        blob = make_blob(path='a.txt', size_bytes=int(2 * KB), is_binary=False)
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(
+            entries[0].violations[0].message, "Text file size 2.0 KB exceeds 1 KB limit")
+
+    def test_max_binary_size_kb_message(self):
+        rule = Rule(name='max_binary_size_kb', match_binary=True,
+                    match_size=SizeCondition('>', 1, 'KB'), action='error', is_input_rule=True)
+        blob = make_blob(path='a.bin', size_bytes=int(2 * KB), is_binary=True)
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(
+            entries[0].violations[0].message, "Binary file size 2.0 KB exceeds 1 KB limit")
+
+    def test_input_rule_hits_are_flagged_as_such(self):
+        rule = Rule(name='max_text_size_kb', match_binary=False,
+                    match_size=SizeCondition('>', 1, 'KB'), action='error', is_input_rule=True)
+        blob = make_blob(size_bytes=int(2 * KB))
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        violation = entries[0].violations[0]
+        self.assertTrue(violation.is_input_rule)
+        self.assertTrue(violation.has_size_condition)
+
+
+class TestPolicyRuleMessages(unittest.TestCase):
+    """Hit messages for a user-defined policy rule."""
+
+    def test_uses_description_when_set(self):
+        rule = Rule(name='big-log', description='Logs belong in the artifact store',
+                    match_extensions=['log'], action='error')
+        blob = make_blob(path='a.log')
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries[0].violations[0].message, 'Logs belong in the artifact store')
+
+    def test_falls_back_to_matched_rule_wording_without_description(self):
+        rule = Rule(name='big-log', match_extensions=['log'], action='error')
+        blob = make_blob(path='a.log')
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(entries[0].violations[0].message, "Matched rule 'big-log'")
+
+    def test_size_condition_appends_comparison_without_description(self):
+        rule = Rule(name='big-log', match_extensions=['log'],
+                    match_size=SizeCondition('>', 50, 'KB'), action='error')
+        blob = make_blob(path='a.log', size_bytes=60000)  # ~58.6 KB
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(
+            entries[0].violations[0].message, "Matched rule 'big-log' (58.6 KB > 50 KB)")
+
+    def test_size_condition_appends_comparison_with_description(self):
+        rule = Rule(name='big-log', description='Logs belong in the artifact store',
+                    match_extensions=['log'], match_size=SizeCondition('>', 50, 'KB'),
+                    action='error')
+        blob = make_blob(path='a.log', size_bytes=60000)  # ~58.6 KB
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertEqual(
+            entries[0].violations[0].message,
+            "Logs belong in the artifact store (58.6 KB > 50 KB)")
+
+    def test_size_operator_rendered_as_written(self):
+        rule = Rule(name='r', match_extensions=['log'],
+                    match_size=SizeCondition('<=', 6, 'MB'), action='error')
+        blob = make_blob(path='a.log', size_bytes=1 * KB)
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertIn('<= 6 MB', entries[0].violations[0].message)
+
+    def test_policy_rule_hits_are_not_flagged_as_input_rules(self):
+        rule = Rule(name='r', match_extensions=['log'], action='error')
+        blob = make_blob(path='a.log')
+        entries = evaluate_blobs([blob], [rule], EvaluationConfig())
+        self.assertFalse(entries[0].violations[0].is_input_rule)
 
 
 class TestHasFailingViolations(unittest.TestCase):
-    """fail_on semantics, including the empty-violations edge case."""
+    """fail_on semantics, including the empty-entries edge case."""
 
-    def _violation(self, severity):
-        blob = make_blob()
-        from repo_size_guardian.models import Violation
-        return Violation(blob=blob, rule_name='x', message='m', severity=severity)
+    def _entries(self, *severities):
+        rules = [Rule(name=f'r{i}', match_extensions=['x'], action=severity)
+                 for i, severity in enumerate(severities)]
+        blob = make_blob(path='a.x')
+        return evaluate_blobs([blob], rules, EvaluationConfig())
 
     def test_fail_on_error_true_with_error_violation(self):
-        self.assertTrue(has_failing_violations([self._violation('error')], 'error'))
+        self.assertTrue(has_failing_violations(self._entries('error'), 'error'))
 
     def test_fail_on_error_false_with_only_warn_violations(self):
-        self.assertFalse(has_failing_violations([self._violation('warn')], 'error'))
+        self.assertFalse(has_failing_violations(self._entries('warn'), 'error'))
 
-    def test_fail_on_error_false_with_empty_violations(self):
+    def test_fail_on_error_false_with_empty_entries(self):
         self.assertFalse(has_failing_violations([], 'error'))
 
     def test_fail_on_any_true_with_warn_violation(self):
-        self.assertTrue(has_failing_violations([self._violation('warn')], 'any'))
+        self.assertTrue(has_failing_violations(self._entries('warn'), 'any'))
 
     def test_fail_on_any_true_with_error_violation(self):
-        self.assertTrue(has_failing_violations([self._violation('error')], 'any'))
+        self.assertTrue(has_failing_violations(self._entries('error'), 'any'))
 
-    def test_fail_on_any_false_with_empty_violations(self):
+    def test_fail_on_any_false_with_empty_entries(self):
         self.assertFalse(has_failing_violations([], 'any'))
 
-    def test_mixed_violations_fail_on_error(self):
-        violations = [self._violation('warn'), self._violation('warn'), self._violation('error')]
-        self.assertTrue(has_failing_violations(violations, 'error'))
+    def test_mixed_severities_in_one_entry_use_the_highest(self):
+        entries = self._entries('warn', 'error')
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(has_failing_violations(entries, 'error'))
 
     def test_invalid_fail_on_raises(self):
         with self.assertRaises(ValueError):
             has_failing_violations([], 'bogus')
 
 
-class TestViolationMessageStyle(unittest.TestCase):
-    """Sanity checks on the models.Violation message contract (one line, no trailing period)."""
-
-    def _assert_message_style(self, message):
-        self.assertIsInstance(message, str)
-        self.assertNotIn('\n', message)
-        self.assertFalse(message.endswith('.'))
-
-    def test_rule_violation_message_style(self):
-        rule = Rule(id='r1', description='desc', match_extensions=['bin'], action='error')
-        policy = Policy(rules=[rule])
-        blob = make_blob(path='a.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self._assert_message_style(violations[0].message)
-
-    def test_disallow_violation_message_style(self):
-        policy = Policy(disallow_extensions=['bin'])
-        blob = make_blob(path='a.bin')
-        violations = evaluate_blobs([blob], policy, EvaluationConfig())
-        self._assert_message_style(violations[0].message)
-
-    def test_threshold_violation_message_style(self):
-        config = EvaluationConfig(max_text_size_kb=1)
-        blob = make_blob(path='a.txt', size_bytes=10 * KB)
-        violations = evaluate_blobs([blob], Policy.empty(), config)
-        self._assert_message_style(violations[0].message)
-
-
 class TestEvaluateBlobsAcceptsIterables(unittest.TestCase):
     """evaluate_blobs takes an Iterable, not necessarily a list, and preserves order."""
 
     def test_generator_input(self):
-        config = EvaluationConfig(max_text_size_kb=1)
+        rule = Rule(name='big', match_size=SizeCondition('>', 1, 'KB'))
 
         def gen():
             yield make_blob(path='a.txt', blob_sha='sha1', size_bytes=10 * KB)
             yield make_blob(path='b.txt', blob_sha='sha2', size_bytes=1)
 
-        violations = evaluate_blobs(gen(), Policy.empty(), config)
-        self.assertEqual(len(violations), 1)
-        self.assertEqual(violations[0].path, 'a.txt')
+        entries = evaluate_blobs(gen(), [rule], EvaluationConfig())
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].path, 'a.txt')
 
 
 if __name__ == '__main__':
